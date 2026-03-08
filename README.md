@@ -459,18 +459,7 @@ openbase.channel('presence-room').track('alice', 'online')
 
 ## Repository Layout
 
-```text
-.
-|-- apps
-|   |-- api        # Fastify API
-|   |-- dashboard  # Next.js admin/dashboard UI
-|   `-- sdk        # JavaScript/TypeScript client
-|-- packages
-|   |-- core       # shared types, errors, utilities
-|   `-- telegram   # Telegram-backed storage provider
-|-- docker-compose.yml
-`-- .env.example
-```
+![OpenBase repository layout](docs/assets/openbase-repo-layout.png)
 
 ## Limitations
 
