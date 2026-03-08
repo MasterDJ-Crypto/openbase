@@ -59,7 +59,7 @@ This architecture keeps the control plane local to your server while using Teleg
 ## Self-Hosting Quickstart
 
 <details>
-<summary><strong>🤖 Let your AI do it — send this prompt to your AI agent</strong></summary>
+<summary><strong>🤖 Let your AI do it</strong></summary>
 
 ```text
 You are setting up OpenBase for me on this machine.
