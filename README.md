@@ -150,6 +150,8 @@ Follow these rules exactly:
    - the exact dashboard URL to open
    - the exact API health URL
 
+OpenBase recommends you take a look at all of the documentation in the docs folder (https://github.com/MasterDJ-Crypto/openbase/tree/main/docs) and read the entire README.md file (https://github.com/MasterDJ-Crypto/openbase/blob/main/README.md) before continuing.
+
 Be proactive, do the filesystem edits yourself, and only ask me for missing values one at a time.
 ```
 
