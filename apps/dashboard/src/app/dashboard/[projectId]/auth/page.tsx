@@ -1,6 +1,6 @@
 'use client'
 
-import { authUserSchema } from '@openbase/core'
+import { authResultSchema, authUserSchema } from '@openbase/core'
 import { useEffect, useMemo, useState } from 'react'
 import { useParams } from 'next/navigation'
 import { z } from 'zod'
@@ -16,7 +16,15 @@ import {
     Trash2,
     Users,
 } from 'lucide-react'
-import { authenticatedFetch, getApiUrl, readApiEnvelope } from '../../../../lib/platformApi'
+import {
+    authenticatedFetch,
+    authenticatedProjectFetch,
+    clearProjectAuthSession,
+    getApiUrl,
+    getProjectAuthSession,
+    readApiEnvelope,
+    setProjectAuthSession,
+} from '../../../../lib/platformApi'
 
 const authProviderSchema = z.object({
     name: z.string(),
@@ -26,6 +34,25 @@ const authProviderSchema = z.object({
 
 type AuthUser = z.infer<typeof authUserSchema>
 type AuthProvider = z.infer<typeof authProviderSchema>
+
+const projectMfaEnrollmentSchema = z.object({
+    enrollment_token: z.string(),
+    secret: z.string(),
+    uri: z.string(),
+})
+
+const projectMfaVerifySchema = z.object({
+    enabled: z.boolean(),
+})
+
+const projectSignInSchema = z.union([
+    authResultSchema,
+    z.object({
+        mfa_required: z.literal(true),
+        challenge_token: z.string(),
+        user: authUserSchema,
+    }),
+])
 
 export default function AuthSettingsPage() {
     const params = useParams()
@@ -40,10 +67,20 @@ export default function AuthSettingsPage() {
     const [error, setError] = useState('')
     const [oauthLoading, setOauthLoading] = useState<string | null>(null)
     const [actionUserId, setActionUserId] = useState<string | null>(null)
+    const [projectUser, setProjectUser] = useState<AuthUser | null>(null)
+    const [projectAuthEmail, setProjectAuthEmail] = useState('')
+    const [projectAuthPassword, setProjectAuthPassword] = useState('')
+    const [projectAuthMfaCode, setProjectAuthMfaCode] = useState('')
+    const [projectAuthLoading, setProjectAuthLoading] = useState(false)
+    const [projectAuthError, setProjectAuthError] = useState('')
+    const [projectMfaEnrollment, setProjectMfaEnrollment] = useState<z.infer<typeof projectMfaEnrollmentSchema> | null>(null)
+    const [projectMfaVerifyCode, setProjectMfaVerifyCode] = useState('')
+    const [projectMfaLoading, setProjectMfaLoading] = useState(false)
 
     useEffect(() => {
         void fetchUsers()
         void fetchProviders()
+        void fetchProjectUser()
     }, [projectId])
 
     const summary = useMemo(() => ({
@@ -77,6 +114,22 @@ export default function AuthSettingsPage() {
         }
     }
 
+    const fetchProjectUser = async () => {
+        if (!getProjectAuthSession(projectId)) {
+            setProjectUser(null)
+            return
+        }
+
+        try {
+            const response = await authenticatedProjectFetch(projectId, `${getApiUrl()}/api/v1/${projectId}/auth/user`)
+            const data = await readApiEnvelope(response, authUserSchema)
+            setProjectUser(data)
+        } catch {
+            clearProjectAuthSession(projectId)
+            setProjectUser(null)
+        }
+    }
+
     const runUserAction = async (userId: string, request: RequestInit & { path: string }) => {
         setActionUserId(userId)
         setError('')
@@ -92,6 +145,127 @@ export default function AuthSettingsPage() {
             setError((nextError as Error).message)
         } finally {
             setActionUserId(null)
+        }
+    }
+
+    const handleProjectSignIn = async () => {
+        if (!projectAuthEmail || !projectAuthPassword) {
+            setProjectAuthError('Email and password are required.')
+            return
+        }
+
+        setProjectAuthLoading(true)
+        setProjectAuthError('')
+
+        try {
+            const response = await fetch(`${getApiUrl()}/api/v1/${projectId}/auth/signin`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    email: projectAuthEmail,
+                    password: projectAuthPassword,
+                    ...(projectAuthMfaCode ? { mfa_code: projectAuthMfaCode } : {}),
+                }),
+            })
+            const payload = await readApiEnvelope(response, projectSignInSchema)
+
+            if ('mfa_required' in payload) {
+                setProjectAuthError('This account requires an MFA code. Enter the current TOTP code and try again.')
+                return
+            }
+
+            setProjectAuthSession(projectId, payload.session)
+            setProjectUser(payload.user)
+            setProjectAuthPassword('')
+            setProjectAuthMfaCode('')
+        } catch (nextError) {
+            setProjectAuthError((nextError as Error).message)
+        } finally {
+            setProjectAuthLoading(false)
+        }
+    }
+
+    const handleProjectSignOut = async () => {
+        const session = getProjectAuthSession(projectId)
+
+        try {
+            if (session?.refresh_token) {
+                await fetch(`${getApiUrl()}/api/v1/${projectId}/auth/signout`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ refresh_token: session.refresh_token }),
+                })
+            }
+        } finally {
+            clearProjectAuthSession(projectId)
+            setProjectUser(null)
+            setProjectMfaEnrollment(null)
+            setProjectMfaVerifyCode('')
+        }
+    }
+
+    const handleStartMfaEnrollment = async () => {
+        setProjectMfaLoading(true)
+        setProjectAuthError('')
+
+        try {
+            const response = await authenticatedProjectFetch(projectId, `${getApiUrl()}/api/v1/${projectId}/auth/mfa/totp/enroll`, {
+                method: 'POST',
+            })
+            const data = await readApiEnvelope(response, projectMfaEnrollmentSchema)
+            setProjectMfaEnrollment(data)
+        } catch (nextError) {
+            setProjectAuthError((nextError as Error).message)
+        } finally {
+            setProjectMfaLoading(false)
+        }
+    }
+
+    const handleVerifyMfaEnrollment = async () => {
+        if (!projectMfaEnrollment || !projectMfaVerifyCode) {
+            setProjectAuthError('Enter the current authenticator code to complete enrollment.')
+            return
+        }
+
+        setProjectMfaLoading(true)
+        setProjectAuthError('')
+
+        try {
+            const response = await authenticatedProjectFetch(projectId, `${getApiUrl()}/api/v1/${projectId}/auth/mfa/totp/verify`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    enrollment_token: projectMfaEnrollment.enrollment_token,
+                    code: projectMfaVerifyCode,
+                }),
+            })
+            await readApiEnvelope(response, projectMfaVerifySchema)
+            setProjectMfaEnrollment(null)
+            setProjectMfaVerifyCode('')
+            await fetchProjectUser()
+        } catch (nextError) {
+            setProjectAuthError((nextError as Error).message)
+        } finally {
+            setProjectMfaLoading(false)
+        }
+    }
+
+    const handleDisableOwnMfa = async () => {
+        setProjectMfaLoading(true)
+        setProjectAuthError('')
+
+        try {
+            const response = await authenticatedProjectFetch(projectId, `${getApiUrl()}/api/v1/${projectId}/auth/mfa/totp/disable`, {
+                method: 'POST',
+            })
+            const data = await readApiEnvelope(response, authUserSchema)
+            setProjectUser(data)
+            setProjectMfaEnrollment(null)
+            setProjectMfaVerifyCode('')
+        } catch (nextError) {
+            setProjectAuthError((nextError as Error).message)
+        } finally {
+            setProjectMfaLoading(false)
         }
     }
 
@@ -178,6 +352,168 @@ export default function AuthSettingsPage() {
                     {error}
                 </div>
             )}
+
+            <section className="panel-muted mt-6 p-6">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                        <h2 className="text-lg font-semibold text-white">Project user session + MFA</h2>
+                        <p className="mt-2 max-w-2xl text-sm leading-7 subtle">
+                            Sign in as a project user to enroll TOTP MFA, verify setup, and disable it again without leaving the dashboard.
+                        </p>
+                    </div>
+                    {projectUser && (
+                        <button type="button" onClick={handleProjectSignOut} className="btn btn-secondary">
+                            Sign out project user
+                        </button>
+                    )}
+                </div>
+
+                {projectAuthError && (
+                    <div className="mt-5 rounded-[10px] border border-[rgba(239,111,108,0.25)] bg-[rgba(239,111,108,0.08)] px-4 py-3 text-sm text-[#f0b1af]">
+                        {projectAuthError}
+                    </div>
+                )}
+
+                {!projectUser ? (
+                    <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_220px_auto]">
+                        <div>
+                            <label htmlFor="project-auth-email" className="label">
+                                Project user email
+                            </label>
+                            <input
+                                id="project-auth-email"
+                                type="email"
+                                value={projectAuthEmail}
+                                onChange={event => setProjectAuthEmail(event.target.value)}
+                                placeholder="user@example.com"
+                                className="input"
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="project-auth-password" className="label">
+                                Password
+                            </label>
+                            <input
+                                id="project-auth-password"
+                                type="password"
+                                value={projectAuthPassword}
+                                onChange={event => setProjectAuthPassword(event.target.value)}
+                                placeholder="Project password"
+                                className="input"
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="project-auth-mfa" className="label">
+                                MFA code
+                            </label>
+                            <input
+                                id="project-auth-mfa"
+                                value={projectAuthMfaCode}
+                                onChange={event => setProjectAuthMfaCode(event.target.value)}
+                                placeholder="Optional"
+                                className="input"
+                                inputMode="numeric"
+                            />
+                        </div>
+                        <div className="flex items-end">
+                            <button type="button" onClick={handleProjectSignIn} disabled={projectAuthLoading} className="btn btn-primary w-full">
+                                {projectAuthLoading ? 'Signing in...' : 'Sign in'}
+                            </button>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="mt-5 grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
+                        <div className="panel-soft p-5">
+                            <div className="text-xs uppercase tracking-[0.14em] subtle">Current project user</div>
+                            <div className="mt-3 text-lg font-semibold text-white">{projectUser.email}</div>
+                            <div className="mt-2 font-mono text-xs subtle">{projectUser.id}</div>
+                            <div className="mt-4 flex flex-wrap gap-2">
+                                <span className={`status-badge ${projectUser.confirmed_at ? 'text-[color:var(--success)]' : 'text-[color:var(--warning)]'}`}>
+                                    <span className="status-dot" />
+                                    {projectUser.confirmed_at ? 'confirmed' : 'pending confirmation'}
+                                </span>
+                                <span className={`status-badge ${projectUser.totp_enabled ? 'text-[color:var(--success)]' : 'text-[color:var(--muted)]'}`}>
+                                    <span className="status-dot" />
+                                    {projectUser.totp_enabled ? 'mfa enabled' : 'mfa off'}
+                                </span>
+                            </div>
+                        </div>
+
+                        <div className="panel-soft p-5">
+                            {!projectUser.totp_enabled ? (
+                                <>
+                                    <div className="flex items-center gap-3">
+                                        <ShieldCheck className="h-5 w-5 text-[color:var(--accent)]" />
+                                        <div>
+                                            <div className="text-lg font-semibold text-white">Enroll TOTP MFA</div>
+                                            <div className="mt-1 text-sm subtle">Start enrollment, add the secret to your authenticator app, then verify with a live code.</div>
+                                        </div>
+                                    </div>
+
+                                    {!projectMfaEnrollment ? (
+                                        <button type="button" onClick={handleStartMfaEnrollment} disabled={projectMfaLoading} className="btn btn-primary mt-5">
+                                            {projectMfaLoading ? 'Preparing...' : 'Start enrollment'}
+                                        </button>
+                                    ) : (
+                                        <div className="mt-5 space-y-4">
+                                            <div className="panel px-4 py-4">
+                                                <div className="text-xs uppercase tracking-[0.14em] subtle">Authenticator URI</div>
+                                                <div className="mt-2 break-all text-xs text-white">{projectMfaEnrollment.uri}</div>
+                                            </div>
+                                            <div className="panel px-4 py-4">
+                                                <div className="text-xs uppercase tracking-[0.14em] subtle">Secret</div>
+                                                <div className="mt-2 font-mono text-sm text-white">{projectMfaEnrollment.secret}</div>
+                                            </div>
+                                            <div>
+                                                <label htmlFor="project-mfa-verify" className="label">
+                                                    Verification code
+                                                </label>
+                                                <input
+                                                    id="project-mfa-verify"
+                                                    value={projectMfaVerifyCode}
+                                                    onChange={event => setProjectMfaVerifyCode(event.target.value)}
+                                                    placeholder="123456"
+                                                    className="input"
+                                                    inputMode="numeric"
+                                                />
+                                            </div>
+                                            <div className="flex gap-3">
+                                                <button type="button" onClick={handleVerifyMfaEnrollment} disabled={projectMfaLoading} className="btn btn-primary">
+                                                    {projectMfaLoading ? 'Verifying...' : 'Verify enrollment'}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setProjectMfaEnrollment(null)
+                                                        setProjectMfaVerifyCode('')
+                                                    }}
+                                                    className="btn btn-secondary"
+                                                >
+                                                    Cancel
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
+                                </>
+                            ) : (
+                                <>
+                                    <div className="flex items-center gap-3">
+                                        <ShieldOff className="h-5 w-5 text-[color:var(--accent)]" />
+                                        <div>
+                                            <div className="text-lg font-semibold text-white">Disable TOTP MFA</div>
+                                            <div className="mt-1 text-sm subtle">This removes the current authenticator secret for the signed-in project user.</div>
+                                        </div>
+                                    </div>
+
+                                    <button type="button" onClick={handleDisableOwnMfa} disabled={projectMfaLoading} className="btn btn-danger mt-5">
+                                        {projectMfaLoading ? 'Updating...' : 'Disable my MFA'}
+                                    </button>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                )}
+            </section>
 
             <div className="mt-6 grid gap-6 xl:grid-cols-[0.92fr_1.08fr]">
                 <section className="panel p-6">

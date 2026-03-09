@@ -83,8 +83,14 @@ export class OpenBaseClient {
      * Create a query builder for a table.
      * @param table - The table name to query
      */
-    from<T = Record<string, unknown>>(table: string): QueryBuilder<T> {
-        return new QueryBuilder<T>(table, this.projectUrl, this.apiKey, this.projectId, () => this.auth.getAccessToken())
+    from<TRow = Record<string, unknown>, TInsert = Partial<TRow>, TUpdate = Partial<TRow>>(table: string): QueryBuilder<TRow, TInsert, TUpdate> {
+        return new QueryBuilder<TRow, TInsert, TUpdate>(
+            table,
+            this.projectUrl,
+            this.apiKey,
+            this.projectId,
+            () => this.auth.getAccessToken()
+        )
     }
 
     /**

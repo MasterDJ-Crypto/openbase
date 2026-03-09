@@ -8,7 +8,13 @@ const rowSchema = z.record(z.unknown())
 const rowsResponseSchema = z.union([z.array(rowSchema), rowSchema, z.null()])
 const countResponseSchema = z.object({ count: z.number() })
 
-export class QueryBuilder<T = Record<string, unknown>> {
+type ColumnKey<T> = Extract<keyof T, string>
+
+export class QueryBuilder<
+    TRow = Record<string, unknown>,
+    TInsert = Partial<TRow>,
+    TUpdate = Partial<TRow>,
+> {
     private filters: QueryFilter[] = []
     private _select: string[] = []
     private _selectOptions: SelectOptions = {}
@@ -37,19 +43,19 @@ export class QueryBuilder<T = Record<string, unknown>> {
         return this
     }
 
-    eq(column: string, value: unknown): this { return this.addFilter(column, 'eq', value) }
-    neq(column: string, value: unknown): this { return this.addFilter(column, 'neq', value) }
-    gt(column: string, value: unknown): this { return this.addFilter(column, 'gt', value) }
-    gte(column: string, value: unknown): this { return this.addFilter(column, 'gte', value) }
-    lt(column: string, value: unknown): this { return this.addFilter(column, 'lt', value) }
-    lte(column: string, value: unknown): this { return this.addFilter(column, 'lte', value) }
-    like(column: string, pattern: string): this { return this.addFilter(column, 'like', pattern) }
-    ilike(column: string, pattern: string): this { return this.addFilter(column, 'ilike', pattern) }
-    in(column: string, values: unknown[]): this { return this.addFilter(column, 'in', values) }
-    is(column: string, value: null | boolean): this { return this.addFilter(column, 'is', value) }
+    eq(column: ColumnKey<TRow> | string, value: unknown): this { return this.addFilter(String(column), 'eq', value) }
+    neq(column: ColumnKey<TRow> | string, value: unknown): this { return this.addFilter(String(column), 'neq', value) }
+    gt(column: ColumnKey<TRow> | string, value: unknown): this { return this.addFilter(String(column), 'gt', value) }
+    gte(column: ColumnKey<TRow> | string, value: unknown): this { return this.addFilter(String(column), 'gte', value) }
+    lt(column: ColumnKey<TRow> | string, value: unknown): this { return this.addFilter(String(column), 'lt', value) }
+    lte(column: ColumnKey<TRow> | string, value: unknown): this { return this.addFilter(String(column), 'lte', value) }
+    like(column: ColumnKey<TRow> | string, pattern: string): this { return this.addFilter(String(column), 'like', pattern) }
+    ilike(column: ColumnKey<TRow> | string, pattern: string): this { return this.addFilter(String(column), 'ilike', pattern) }
+    in(column: ColumnKey<TRow> | string, values: unknown[]): this { return this.addFilter(String(column), 'in', values) }
+    is(column: ColumnKey<TRow> | string, value: null | boolean): this { return this.addFilter(String(column), 'is', value) }
 
-    order(column: string, options?: { ascending?: boolean }): this {
-        this._order = { column, ascending: options?.ascending ?? true }
+    order(column: ColumnKey<TRow> | string, options?: { ascending?: boolean }): this {
+        this._order = { column: String(column), ascending: options?.ascending ?? true }
         return this
     }
 
@@ -64,23 +70,23 @@ export class QueryBuilder<T = Record<string, unknown>> {
         return this
     }
 
-    single(): Promise<QueryResult<T>> {
+    single(): Promise<QueryResult<TRow>> {
         this._limit = 1
         return this.execute().then(result => {
             const singleData = (result.data && Array.isArray(result.data))
-                ? (result.data[0] as unknown as T) || null
+                ? (result.data[0] as unknown as TRow) || null
                 : null
-            return { ...result, data: singleData } as unknown as QueryResult<T>
+            return { ...result, data: singleData } as unknown as QueryResult<TRow>
         })
     }
 
-    insert(data: Partial<T> | Partial<T>[]): this {
+    insert(data: TInsert | TInsert[]): this {
         this._operation = 'insert'
         this._body = data
         return this
     }
 
-    update(data: Partial<T>): this {
+    update(data: TUpdate): this {
         this._operation = 'update'
         this._body = data
         return this
@@ -91,21 +97,21 @@ export class QueryBuilder<T = Record<string, unknown>> {
         return this
     }
 
-    upsert(data: Partial<T> | Partial<T>[], options?: UpsertOptions): this {
+    upsert(data: TInsert | TInsert[], options?: UpsertOptions): this {
         this._operation = 'upsert'
         this._body = data
         this._upsertOptions = options
         return this
     }
 
-    then<TResult1 = QueryResult<T[]>, TResult2 = never>(
-        onfulfilled?: ((value: QueryResult<T[]>) => TResult1 | PromiseLike<TResult1>) | null,
+    then<TResult1 = QueryResult<TRow[]>, TResult2 = never>(
+        onfulfilled?: ((value: QueryResult<TRow[]>) => TResult1 | PromiseLike<TResult1>) | null,
         onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
     ): Promise<TResult1 | TResult2> {
         return this.execute().then(onfulfilled, onrejected)
     }
 
-    private async execute(): Promise<QueryResult<T[]>> {
+    private async execute(): Promise<QueryResult<TRow[]>> {
         const token = this.getAccessToken() || this.apiKey
         const headers: Record<string, string> = {
             Authorization: `Bearer ${token}`,
@@ -151,7 +157,7 @@ export class QueryBuilder<T = Record<string, unknown>> {
                     : [result.data]
 
             return {
-                data: data as T[] | null,
+                data: data as TRow[] | null,
                 error: null,
                 count,
             }

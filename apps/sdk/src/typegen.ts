@@ -34,7 +34,7 @@ export function generateTypescriptSchemaClient(schemaExport: SchemaExport): stri
         'export type TableUpdate<T extends TableName> = Database[\'public\'][\'Tables\'][T][\'Update\']',
         '',
         'export type OpenBaseTypedClient = Omit<OpenBaseClient, \'from\'> & {',
-        '  from<T extends TableName>(table: T): QueryBuilder<TableRow<T>>',
+        '  from<T extends TableName>(table: T): QueryBuilder<TableRow<T>, TableInsert<T>, TableUpdate<T>>',
         '}',
         '',
         'export function createTypedClient(projectUrl: string, anonKey: string): OpenBaseTypedClient {',

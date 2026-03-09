@@ -306,15 +306,34 @@ data.subscription.unsubscribe()
 
 ### MFA methods
 
-The current `openbase-js` `AuthClient` does not expose dedicated TOTP enrollment or challenge helpers beyond `signInWithPassword({ mfa_code })`.
+The SDK exposes dedicated TOTP helpers on `openbase.auth.mfa`.
 
-MFA exists in the backend and dashboard, but there are no separate SDK methods today such as:
+#### `openbase.auth.mfa.enroll()`
 
-- `enrollMfa()`
-- `verifyMfa()`
-- `challengeMfa()`
+Starts TOTP enrollment and returns the enrollment token, raw secret, and otpauth URI.
 
-If you need those flows from the client, you must call the corresponding REST endpoints directly until the SDK adds first-class helpers.
+```ts
+const { data, error } = await openbase.auth.mfa.enroll()
+```
+
+#### `openbase.auth.mfa.verify({ enrollment_token, code })`
+
+Completes enrollment with a live authenticator code.
+
+```ts
+const { data, error } = await openbase.auth.mfa.verify({
+  enrollment_token: data.enrollment_token,
+  code: '123456',
+})
+```
+
+#### `openbase.auth.mfa.disable()`
+
+Removes the current user's TOTP secret and disables MFA.
+
+```ts
+const { data, error } = await openbase.auth.mfa.disable()
+```
 
 ## StorageClient
 
@@ -528,4 +547,4 @@ subscription.unsubscribe()
 ## Notes
 
 - The SDK is intentionally close to Supabase's ergonomics, but it is not a drop-in reimplementation of every Supabase feature.
-- Auth MFA, advanced admin helpers, and some higher-level convenience methods are not yet fully surfaced in `openbase-js`.
+- Advanced admin helpers and some higher-level convenience methods are still narrower than Supabase's full surface.

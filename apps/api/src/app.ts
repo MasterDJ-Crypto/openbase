@@ -64,9 +64,23 @@ export interface AppContext {
     close: () => Promise<void>
 }
 
+async function createRedisClient(redisUrl: string, useInMemoryRedis: boolean): Promise<Redis> {
+    if (useInMemoryRedis) {
+        const RedisMock = (await import('ioredis-mock')).default
+        return new RedisMock() as unknown as Redis
+    }
+
+    return new Redis(redisUrl, {
+        maxRetriesPerRequest: null,
+        lazyConnect: true,
+        tls: redisUrl.startsWith('rediss://') ? {} : undefined,
+    })
+}
+
 export async function createApp(options: AppBuildOptions = {}): Promise<AppContext> {
     const config = options.config ?? loadConfig()
     const allowedOrigins = buildAllowedOrigins(config.DASHBOARD_URL, config.API_PUBLIC_URL)
+    const useInMemoryRedis = config.REDIS_URL.startsWith('memory://')
 
     const app = Fastify({
         logger: {
@@ -95,11 +109,7 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
         done(null, payload)
     })
 
-    const redis = options.redis ?? new Redis(config.REDIS_URL, {
-        maxRetriesPerRequest: null,
-        lazyConnect: true,
-        tls: config.REDIS_URL.startsWith('rediss://') ? {} : undefined,
-    })
+    const redis = options.redis ?? await createRedisClient(config.REDIS_URL, useInMemoryRedis)
 
     redis.on('error', err => {
         app.log.error({ err }, 'Redis connection error')
@@ -155,7 +165,7 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
         encryptionService,
         masterKey,
         {
-            enableQueue: options.warmupQueuesEnabled ?? config.NODE_ENV !== 'test',
+            enableQueue: options.warmupQueuesEnabled ?? (!useInMemoryRedis && config.NODE_ENV !== 'test'),
         }
     )
 
@@ -186,7 +196,7 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
     const requestLogService = new RequestLogService(redis)
     const platformUserRepository = new PlatformUserRepository(`${config.SQLITE_BASE_PATH}/platform.db`)
     const webhookService = new WebhookService(redis, {
-        inlineProcessing: options.webhookInlineProcessing ?? config.NODE_ENV === 'test',
+        inlineProcessing: options.webhookInlineProcessing ?? (useInMemoryRedis || config.NODE_ENV === 'test'),
         operationsLogService,
     })
     const sendEmail = async (to: string, subject: string, html: string): Promise<void> => {

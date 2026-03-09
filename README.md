@@ -261,6 +261,49 @@ The root `.env.example` currently defines the following variables.
 | `MASTER_ENCRYPTION_KEY` | Yes | 64-character hex key used to encrypt Telegram session strings and related secrets. |
 | `NEXT_PUBLIC_API_URL` | Required for dashboard | Frontend-only variable, set in `apps/dashboard/.env.local`, pointing the dashboard to the API base URL. |
 
+## CLI Workflow
+
+OpenBase also ships a workspace CLI package at `packages/cli` with an `openbase` binary.
+
+Initialize a local project config:
+
+```bash
+openbase init --api-url http://localhost:3001 --service-role-key your-service-role-key
+```
+
+This creates:
+
+- `openbase.config.json`
+- `openbase/migrations/`
+- `openbase/seed.json`
+- `openbase/generated.ts` after type generation
+- `openbase/schema-export.json` after schema pulls
+
+Available commands:
+
+```bash
+openbase status
+openbase start
+openbase stop
+openbase gen types --out ./openbase/generated.ts
+openbase migration new add_posts_table
+openbase migration run
+openbase migration rollback
+openbase db push
+openbase db pull --out ./openbase/schema-export.json
+openbase db reset --seed true
+openbase seed --file ./openbase/seed.json
+```
+
+Command notes:
+
+- `openbase start` and `openbase stop` manage the local workspace process started from the repo root.
+- `openbase db push` applies pending local migrations to the configured project.
+- `openbase db pull` writes the live remote schema export to disk.
+- `openbase db reset` rolls back local migrations in reverse order, reapplies them by default, and can optionally run seeds.
+- `openbase seed` inserts rows from a JSON seed file shaped like `{ "tables": { "posts": [{ ... }] } }`.
+- `openbase gen types` introspects the live project schema and emits a typed TypeScript client helper.
+
 ## SDK Usage
 
 OpenBase ships with a JavaScript/TypeScript SDK in `apps/sdk` with a Supabase-style API.

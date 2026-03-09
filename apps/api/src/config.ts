@@ -6,6 +6,22 @@
 import { z } from 'zod'
 
 const envBoolean = z.enum(['true', 'false']).default('false').transform(value => value === 'true')
+const optionalString = z.preprocess(
+    value => typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.string().optional()
+)
+const optionalEmail = z.preprocess(
+    value => typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.string().email().optional()
+)
+const optionalUrl = z.preprocess(
+    value => typeof value === 'string' && value.trim() === '' ? undefined : value,
+    z.string().url().optional()
+)
+const optionalNumber = z.preprocess(
+    value => value === '' ? undefined : value,
+    z.coerce.number().optional()
+)
 
 const envSchema = z.object({
     PORT: z.coerce.number().default(3001),
@@ -22,6 +38,9 @@ const envSchema = z.object({
         .default('redis://localhost:6379')
         .superRefine((value, ctx) => {
             const url = new URL(value)
+            if (url.protocol === 'memory:') {
+                return
+            }
             const isLocal = ['localhost', '127.0.0.1'].includes(url.hostname)
 
             if (!isLocal && url.protocol !== 'rediss:') {
@@ -33,8 +52,8 @@ const envSchema = z.object({
         }),
 
     // Email
-    RESEND_API_KEY: z.string().optional(),
-    RESEND_FROM_EMAIL: z.string().email().optional(),
+    RESEND_API_KEY: optionalString,
+    RESEND_FROM_EMAIL: optionalEmail,
 
     // SQLite
     SQLITE_BASE_PATH: z.string().default('./data/indexes'),
@@ -43,14 +62,14 @@ const envSchema = z.object({
     BACKUP_RETENTION_COUNT: z.coerce.number().int().positive().default(10),
 
     // Telegram
-    TELEGRAM_API_ID: z.coerce.number().optional(),
-    TELEGRAM_API_HASH: z.string().min(1).optional(),
+    TELEGRAM_API_ID: optionalNumber,
+    TELEGRAM_API_HASH: optionalString.refine(value => value === undefined || value.length > 0),
     MOCK_TELEGRAM: envBoolean,
     SKIP_WARMUP: envBoolean,
 
     // Dashboard
     DASHBOARD_URL: z.string().url().default('http://localhost:3000'),
-    API_PUBLIC_URL: z.string().url().optional(),
+    API_PUBLIC_URL: optionalUrl,
 
     // Encryption
     MASTER_ENCRYPTION_KEY: z
@@ -58,10 +77,10 @@ const envSchema = z.object({
         .regex(/^[a-fA-F0-9]{64}$/, 'MASTER_ENCRYPTION_KEY must be a 64-character hex string'),
 
     // OAuth
-    GOOGLE_CLIENT_ID: z.string().optional(),
-    GOOGLE_CLIENT_SECRET: z.string().optional(),
-    GITHUB_CLIENT_ID: z.string().optional(),
-    GITHUB_CLIENT_SECRET: z.string().optional(),
+    GOOGLE_CLIENT_ID: optionalString,
+    GOOGLE_CLIENT_SECRET: optionalString,
+    GITHUB_CLIENT_ID: optionalString,
+    GITHUB_CLIENT_SECRET: optionalString,
 }).superRefine((value, ctx) => {
     if (!value.MOCK_TELEGRAM) {
         if (value.TELEGRAM_API_ID === undefined) {

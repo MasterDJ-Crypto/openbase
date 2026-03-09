@@ -146,6 +146,32 @@ For development:
 pnpm dev
 ```
 
+## CLI
+
+The monorepo includes an `openbase` CLI for local workflow automation.
+
+Initialize a config:
+
+```bash
+openbase init --api-url http://localhost:3001 --service-role-key your-service-role-key
+```
+
+Common commands:
+
+```bash
+openbase status
+openbase start
+openbase stop
+openbase migration new add_posts_table
+openbase migration run
+openbase migration rollback
+openbase db push
+openbase db pull
+openbase db reset --seed true
+openbase seed
+openbase gen types --out ./openbase/generated.ts
+```
+
 ## Setting Up a Telegram Account for a Project
 
 OpenBase stores project data in Telegram, so each project needs a usable Telegram account session.

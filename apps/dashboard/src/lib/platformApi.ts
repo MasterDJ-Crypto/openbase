@@ -95,6 +95,81 @@ export function getProjectAuthSession(projectId: string): { access_token: string
     }
 }
 
+export function clearProjectAuthSession(projectId: string): void {
+    if (typeof window === 'undefined') {
+        return
+    }
+
+    window.localStorage.removeItem(`${PROJECT_SESSION_PREFIX}${projectId}`)
+}
+
+export async function refreshProjectAuthSession(projectId: string): Promise<string | null> {
+    const session = getProjectAuthSession(projectId)
+    if (!session?.refresh_token) {
+        clearProjectAuthSession(projectId)
+        return null
+    }
+
+    const response = await fetch(`${getApiUrl()}/api/v1/${projectId}/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: session.refresh_token }),
+    })
+
+    if (!response.ok) {
+        clearProjectAuthSession(projectId)
+        return null
+    }
+
+    const payload = await response.json() as { data?: { session?: { access_token?: string; refresh_token?: string } } }
+    const nextSession = payload.data?.session
+    if (!nextSession?.access_token) {
+        clearProjectAuthSession(projectId)
+        return null
+    }
+
+    const normalizedSession = {
+        access_token: nextSession.access_token,
+        ...(nextSession.refresh_token ? { refresh_token: nextSession.refresh_token } : {}),
+    }
+
+    setProjectAuthSession(projectId, normalizedSession)
+    return normalizedSession.access_token
+}
+
+export async function authenticatedProjectFetch(
+    projectId: string,
+    input: string,
+    init: RequestInit = {}
+): Promise<Response> {
+    const session = getProjectAuthSession(projectId)
+    if (!session?.access_token) {
+        throw new Error('Project auth session missing')
+    }
+
+    const execute = async (accessToken: string) => fetch(input, {
+        ...init,
+        headers: {
+            ...(init.headers || {}),
+            Authorization: `Bearer ${accessToken}`,
+            apikey: accessToken,
+        },
+    })
+
+    let response = await execute(session.access_token)
+    if (response.status !== 401) {
+        return response
+    }
+
+    const refreshedToken = await refreshProjectAuthSession(projectId)
+    if (!refreshedToken) {
+        return response
+    }
+
+    response = await execute(refreshedToken)
+    return response
+}
+
 export async function refreshPlatformSession(): Promise<string | null> {
     const session = getPlatformSession()
     if (!session?.refreshToken) {

@@ -8,7 +8,7 @@ import { z } from 'zod'
 import bcrypt from 'bcryptjs'
 import type Redis from 'ioredis'
 import { TelegramClient } from 'telegram'
-import { StringSession } from 'telegram/sessions'
+import { StringSession } from 'telegram/sessions/index.js'
 import { platformAuthMiddleware } from '../middleware/auth.js'
 import { PlatformAuthService, PlatformUserRepository } from '../platform/index.js'
 
@@ -157,7 +157,7 @@ export function registerPlatformRoutes(
                 )
 
                 await client.connect()
-                const { Api } = await import('telegram/tl')
+                const { Api } = await import('telegram/tl/index.js')
                 const result = await client.invoke(
                     new Api.auth.SendCode({
                         phoneNumber: body.data.phoneNumber,
@@ -239,7 +239,7 @@ export function registerPlatformRoutes(
 
             try {
                 await client.connect()
-                const Api = (await import('telegram/tl')).Api
+                const Api = (await import('telegram/tl/index.js')).Api
 
                 try {
                     await client.invoke(
@@ -262,7 +262,7 @@ export function registerPlatformRoutes(
                         }
 
                         const passwordResult = await client.invoke(new Api.account.GetPassword())
-                        const { computeCheck } = await import('telegram/Password')
+                        const { computeCheck } = await import('telegram/Password.js')
                         const passwordCheck = await computeCheck(passwordResult, body.data.password)
                         await client.invoke(new Api.auth.CheckPassword({ password: passwordCheck }))
                     } else {

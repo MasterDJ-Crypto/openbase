@@ -20,7 +20,7 @@ services:
     container_name: openbase-api
     working_dir: /workspace
     env_file:
-      - .env
+      - "${OPENBASE_RUNTIME_ENV_FILE:-.env}"
     environment:
       PORT: ${PORT:-3001}
       NODE_ENV: ${NODE_ENV:-production}
@@ -60,7 +60,7 @@ services:
     container_name: openbase-dashboard
     working_dir: /workspace
     env_file:
-      - .env
+      - "${OPENBASE_RUNTIME_ENV_FILE:-.env}"
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
     command:
