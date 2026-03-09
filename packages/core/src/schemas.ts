@@ -112,6 +112,104 @@ export const telegramSessionHealthSchema = z.object({
     probeChannelId: z.string().nullable(),
 })
 
+export const columnDefinitionSchema = z.object({
+    name: z.string(),
+    type: z.enum(['text', 'number', 'boolean', 'json', 'timestamp', 'uuid']),
+    required: z.boolean().optional(),
+    unique: z.boolean().optional(),
+    default: z.unknown().optional(),
+    encrypted: z.boolean().optional(),
+})
+
+export const rlsPolicySchema = z.object({
+    operation: z.enum(['SELECT', 'INSERT', 'UPDATE', 'DELETE']),
+    check: z.string(),
+})
+
+export const tableSchemaSchema = z.object({
+    tableName: z.string(),
+    columns: z.array(columnDefinitionSchema),
+    indexes: z.array(z.string()),
+    rls: z.array(rlsPolicySchema).optional(),
+})
+
+export const migrationOperationSchema = z.discriminatedUnion('type', [
+    z.object({
+        type: z.literal('create_table'),
+        table: tableSchemaSchema,
+    }),
+    z.object({
+        type: z.literal('drop_table'),
+        tableName: z.string(),
+    }),
+    z.object({
+        type: z.literal('add_column'),
+        tableName: z.string(),
+        column: columnDefinitionSchema,
+        backfill: z.object({
+            mode: z.enum(['default', 'literal']),
+            value: z.unknown().optional(),
+        }).optional(),
+    }),
+    z.object({
+        type: z.literal('remove_column'),
+        tableName: z.string(),
+        columnName: z.string(),
+    }),
+    z.object({
+        type: z.literal('rename_column'),
+        tableName: z.string(),
+        from: z.string(),
+        to: z.string(),
+    }),
+    z.object({
+        type: z.literal('change_column_type'),
+        tableName: z.string(),
+        columnName: z.string(),
+        nextType: z.enum(['text', 'number', 'boolean', 'json', 'timestamp', 'uuid']),
+    }),
+    z.object({
+        type: z.literal('add_index'),
+        tableName: z.string(),
+        columnName: z.string(),
+    }),
+    z.object({
+        type: z.literal('remove_index'),
+        tableName: z.string(),
+        columnName: z.string(),
+    }),
+    z.object({
+        type: z.literal('replace_rls'),
+        tableName: z.string(),
+        rls: z.array(rlsPolicySchema).optional(),
+    }),
+])
+
+export const migrationDefinitionSchema = z.object({
+    name: z.string(),
+    description: z.string().optional(),
+    up: z.array(migrationOperationSchema),
+    down: z.array(migrationOperationSchema),
+})
+
+export const migrationHistoryEntrySchema = z.object({
+    name: z.string(),
+    description: z.string().optional(),
+    checksum: z.string(),
+    direction: z.enum(['up', 'down']),
+    source: z.enum(['cli', 'dashboard', 'sdk']),
+    appliedAt: z.string(),
+    operations: z.number(),
+})
+
+export const schemaExportSchema = z.object({
+    projectId: z.string(),
+    projectName: z.string(),
+    tables: z.record(tableSchemaSchema),
+    migrations: z.array(migrationHistoryEntrySchema),
+    appliedMigrations: z.array(z.string()),
+})
+
 export const apiErrorPayloadSchema = z.object({
     message: z.string(),
     code: z.string(),

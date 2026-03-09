@@ -65,6 +65,103 @@ export interface TableSchema {
     rls?: RLSPolicy[]
 }
 
+export type MigrationSource = 'cli' | 'dashboard' | 'sdk'
+export type MigrationDirection = 'up' | 'down'
+
+export interface CreateTableMigrationOperation {
+    type: 'create_table'
+    table: TableSchema
+}
+
+export interface DropTableMigrationOperation {
+    type: 'drop_table'
+    tableName: string
+}
+
+export interface AddColumnMigrationOperation {
+    type: 'add_column'
+    tableName: string
+    column: ColumnDefinition
+    backfill?: {
+        mode: 'default' | 'literal'
+        value?: unknown
+    }
+}
+
+export interface RemoveColumnMigrationOperation {
+    type: 'remove_column'
+    tableName: string
+    columnName: string
+}
+
+export interface RenameColumnMigrationOperation {
+    type: 'rename_column'
+    tableName: string
+    from: string
+    to: string
+}
+
+export interface ChangeColumnTypeMigrationOperation {
+    type: 'change_column_type'
+    tableName: string
+    columnName: string
+    nextType: ColumnType
+}
+
+export interface AddIndexMigrationOperation {
+    type: 'add_index'
+    tableName: string
+    columnName: string
+}
+
+export interface RemoveIndexMigrationOperation {
+    type: 'remove_index'
+    tableName: string
+    columnName: string
+}
+
+export interface ReplaceRlsMigrationOperation {
+    type: 'replace_rls'
+    tableName: string
+    rls?: RLSPolicy[]
+}
+
+export type MigrationOperation =
+    | CreateTableMigrationOperation
+    | DropTableMigrationOperation
+    | AddColumnMigrationOperation
+    | RemoveColumnMigrationOperation
+    | RenameColumnMigrationOperation
+    | ChangeColumnTypeMigrationOperation
+    | AddIndexMigrationOperation
+    | RemoveIndexMigrationOperation
+    | ReplaceRlsMigrationOperation
+
+export interface MigrationDefinition {
+    name: string
+    description?: string
+    up: MigrationOperation[]
+    down: MigrationOperation[]
+}
+
+export interface MigrationHistoryEntry {
+    name: string
+    description?: string
+    checksum: string
+    direction: MigrationDirection
+    source: MigrationSource
+    appliedAt: string
+    operations: number
+}
+
+export interface SchemaExport {
+    projectId: string
+    projectName: string
+    tables: Record<string, TableSchema>
+    migrations: MigrationHistoryEntry[]
+    appliedMigrations: string[]
+}
+
 // ─── Query Types ─────────────────────────────────────────────
 
 /** Supported filter operators */
@@ -179,6 +276,7 @@ export interface Project {
     ownerId: string
     telegramSessionEncrypted: string
     channelMap: Record<string, TelegramChannelRef>
+    archivedTableChannels?: Record<string, TelegramChannelRef>
     buckets: Record<string, TelegramChannelRef>
     bucketPolicies: Record<string, BucketPolicy>
     storageIndexChannel: TelegramChannelRef

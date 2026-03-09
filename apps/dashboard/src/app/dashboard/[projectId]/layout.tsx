@@ -7,6 +7,7 @@ import {
     Activity,
     ArrowLeft,
     Database,
+    FileCode2,
     FolderOpen,
     LayoutDashboard,
     ScrollText,
@@ -27,6 +28,7 @@ interface Project {
 const navItems = [
     { label: 'Overview', path: '', icon: LayoutDashboard },
     { label: 'Table editor', path: '/editor', icon: Database },
+    { label: 'Migrations', path: '/migrations', icon: FileCode2 },
     { label: 'Auth', path: '/auth', icon: Shield },
     { label: 'Storage', path: '/storage', icon: FolderOpen },
     { label: 'Realtime', path: '/realtime', icon: Activity },

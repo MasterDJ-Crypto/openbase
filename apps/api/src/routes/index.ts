@@ -1,4 +1,5 @@
 export { registerDatabaseRoutes } from './database.js'
+export { registerMigrationRoutes } from './migrations.js'
 export { registerAuthRoutes } from './auth.js'
 export { registerStorageRoutes } from './storage.js'
 export { registerProjectRoutes } from './projects.js'

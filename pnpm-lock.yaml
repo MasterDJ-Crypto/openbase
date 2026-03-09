@@ -210,6 +210,25 @@ importers:
         specifier: ^5.4.0
         version: 5.9.3
 
+  packages/cli:
+    dependencies:
+      '@openbase/core':
+        specifier: workspace:*
+        version: link:../core
+      openbase-js:
+        specifier: workspace:*
+        version: link:../../apps/sdk
+    devDependencies:
+      '@types/node':
+        specifier: ^20.0.0
+        version: 20.19.33
+      rimraf:
+        specifier: ^5.0.0
+        version: 5.0.10
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
+
   packages/core:
     dependencies:
       zod:

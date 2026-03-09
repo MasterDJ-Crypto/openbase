@@ -11,6 +11,7 @@ import { EncryptionService } from './encryption/index.js'
 import { buildErrorEnvelope, validateOutputEnvelope } from './http/response.js'
 import { RequestLogService } from './logs/index.js'
 import { createRateLimiter } from './middleware/index.js'
+import { MigrationService } from './migrations/index.js'
 import { OperationsLogService } from './ops/index.js'
 import { PlatformUserRepository } from './platform/index.js'
 import { ProjectService } from './projects/index.js'
@@ -19,6 +20,7 @@ import { TelegramRealtimeBridge } from './realtime/index.js'
 import {
     registerAuthRoutes,
     registerDatabaseRoutes,
+    registerMigrationRoutes,
     registerPlatformRoutes,
     registerProjectRoutes,
     registerStorageRoutes,
@@ -181,6 +183,11 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
         }
         return manager
     }
+    const migrationService = new MigrationService(projectService, {
+        getIndexManager,
+        encryptionService,
+        masterKey,
+    })
 
     app.setErrorHandler((error, _request, reply) => {
         const statusCode = (error as { statusCode?: number }).statusCode || 500
@@ -261,6 +268,7 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
     await realtimeBridge.start()
 
     registerDatabaseRoutes(app, projectService, getIndexManager, encryptionService, masterKey, realtimeService, webhookService)
+    registerMigrationRoutes(app, projectService, migrationService)
     registerAuthRoutes(
         app,
         redis,

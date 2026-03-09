@@ -25,6 +25,7 @@
  */
 
 import { QueryBuilder } from './QueryBuilder.js'
+import { OpenBaseAdminClient } from './AdminClient.js'
 import { AuthClient } from './AuthClient.js'
 import { StorageClient } from './StorageClient.js'
 import { RealtimeClient, RealtimeChannel } from './RealtimeClient.js'
@@ -37,9 +38,9 @@ export class OpenBaseClient {
     /** Realtime client */
     realtime: RealtimeClient
 
-    private projectUrl: string
-    private apiKey: string
-    private projectId: string
+    protected readonly projectUrl: string
+    protected readonly apiKey: string
+    protected readonly projectId: string
 
     constructor(projectUrl: string, anonKey: string) {
         // Normalize URL
@@ -128,11 +129,17 @@ export function createClient(projectUrl: string, anonKey: string): OpenBaseClien
     return new OpenBaseClient(projectUrl, anonKey)
 }
 
+export function createAdminClient(projectUrl: string, serviceRoleKey: string): OpenBaseAdminClient {
+    return new OpenBaseAdminClient(projectUrl, serviceRoleKey)
+}
+
 // Re-export types and sub-clients
 export { QueryBuilder } from './QueryBuilder.js'
+export { OpenBaseAdminClient } from './AdminClient.js'
 export { AuthClient } from './AuthClient.js'
 export { StorageClient } from './StorageClient.js'
 export { RealtimeClient, RealtimeChannel } from './RealtimeClient.js'
+export { generateTypescriptSchemaClient } from './typegen.js'
 export type {
     QueryResult,
     AuthResult,

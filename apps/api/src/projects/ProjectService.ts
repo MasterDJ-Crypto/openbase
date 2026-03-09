@@ -75,6 +75,7 @@ export class ProjectService {
                 ownerId,
                 telegramSessionEncrypted: encryptedSession,
                 channelMap: {},
+                archivedTableChannels: {},
                 buckets: {},
                 bucketPolicies: {},
                 storageIndexChannel: reservedChannels.storageIndexChannel,
@@ -183,6 +184,17 @@ export class ProjectService {
         )
     }
 
+    async markSchemaRemoved(
+        schemaChannel: TelegramChannelRef,
+        tableName: string,
+        provider: StorageProvider
+    ): Promise<void> {
+        await provider.sendMessage(
+            schemaChannel,
+            JSON.stringify({ __type: 'TABLE_SCHEMA_REMOVED', tableName })
+        )
+    }
+
     async getSchemas(projectId: string): Promise<Record<string, TableSchema>> {
         return this.withProjectStorage(projectId, async (project, provider) => {
             const messages = await this.getAllMessages(provider, project.schemaChannel)
@@ -199,6 +211,10 @@ export class ProjectService {
                     if (data.__type === 'TABLE_SCHEMA' && data.tableName && data.schema) {
                         schemas[data.tableName] = data.schema
                     }
+
+                    if (data.__type === 'TABLE_SCHEMA_REMOVED' && data.tableName) {
+                        delete schemas[data.tableName]
+                    }
                 } catch {
                     // Ignore non-schema messages.
                 }
@@ -214,6 +230,10 @@ export class ProjectService {
 
         await this.providerFactory.withSession(sessionString, async provider => {
             for (const channel of Object.values(project.channelMap)) {
+                await provider.deleteChannel(channel).catch(() => undefined)
+            }
+
+            for (const channel of Object.values(project.archivedTableChannels || {})) {
                 await provider.deleteChannel(channel).catch(() => undefined)
             }
 

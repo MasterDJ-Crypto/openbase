@@ -1,0 +1,26 @@
+{
+    "name": "@openbase/cli",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "bin": {
+        "openbase": "./dist/index.js"
+    },
+    "scripts": {
+        "build": "tsc",
+        "typecheck": "tsc --noEmit",
+        "lint": "eslint \"src/**/*.{ts,tsx}\" --max-warnings=0",
+        "test": "node -e \"process.exit(0)\"",
+        "clean": "rimraf dist",
+        "dev": "tsc --watch"
+    },
+    "dependencies": {
+        "@openbase/core": "workspace:*",
+        "openbase-js": "workspace:*"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "rimraf": "^5.0.0",
+        "typescript": "^5.4.0"
+    }
+}

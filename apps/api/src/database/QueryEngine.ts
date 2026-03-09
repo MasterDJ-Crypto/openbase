@@ -183,31 +183,26 @@ export class QueryEngine {
         data: Record<string, unknown>,
         rows: Record<string, unknown>[]
     ): Promise<Record<string, unknown>[]> {
-        const updatedRows: Record<string, unknown>[] = []
+        const touchesUpdatedAt = this.schema.columns.some(
+            column => column.name === 'updated_at' && column.type === 'timestamp'
+        )
 
-        for (const row of rows) {
-            const messageId = row._msgId as number
-            const updated: Record<string, unknown> = {
-                ...row,
-                ...data,
-                updated_at: new Date().toISOString(),
-            }
-            delete updated._msgId
+        return this.replaceRows(
+            tableName,
+            channel,
+            rows.map(row => {
+                const updated: Record<string, unknown> = {
+                    ...row,
+                    ...data,
+                }
 
-            this.validateRow(updated)
-            await this.ensureUniqueConstraints(tableName, channel, updated, messageId)
+                if (touchesUpdatedAt) {
+                    updated.updated_at = new Date().toISOString()
+                }
 
-            await this.storageProvider.editMessage(
-                channel,
-                messageId,
-                JSON.stringify(this.encodeRow(updated))
-            )
-
-            await this.updateIndexes(tableName, messageId, updated)
-            updatedRows.push({ _msgId: messageId, ...updated })
-        }
-
-        return updatedRows
+                return updated
+            })
+        )
     }
 
     async deleteRows(
@@ -225,6 +220,34 @@ export class QueryEngine {
         }
 
         return deletedRows
+    }
+
+    async replaceRows(
+        tableName: string,
+        channel: string | { id: string; accessHash: string },
+        rows: Record<string, unknown>[]
+    ): Promise<Record<string, unknown>[]> {
+        const updatedRows: Record<string, unknown>[] = []
+
+        for (const row of rows) {
+            const messageId = row._msgId as number
+            const nextRow = { ...row }
+            delete nextRow._msgId
+
+            this.validateRow(nextRow)
+            await this.ensureUniqueConstraints(tableName, channel, nextRow, messageId)
+
+            await this.storageProvider.editMessage(
+                channel,
+                messageId,
+                JSON.stringify(this.encodeRow(nextRow))
+            )
+
+            await this.updateIndexes(tableName, messageId, nextRow)
+            updatedRows.push({ _msgId: messageId, ...nextRow })
+        }
+
+        return updatedRows
     }
 
     private async fetchAllMessages(channel: string | { id: string; accessHash: string }): Promise<TelegramMessage[]> {
