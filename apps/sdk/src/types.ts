@@ -1,6 +1,13 @@
-/**
- * SDK Types
- */
+import type {
+    QueryFilter,
+    RealtimeFilterExpression,
+    StorageObjectPolicy,
+    StorageRule,
+    TransactionOperation,
+    TransactionResult,
+} from '@openbase/core'
+
+export type { QueryFilter, StorageObjectPolicy, StorageRule, TransactionOperation, TransactionResult }
 
 /** Result from any SDK operation */
 export interface QueryResult<T = Record<string, unknown>> {
@@ -39,6 +46,7 @@ export interface AuthResult {
 export interface RealtimePayload<T = Record<string, unknown>> {
     schema: string
     table: string
+    channel?: string
     commit_timestamp: string
     eventType: 'INSERT' | 'UPDATE' | 'DELETE' | '*'
     new: T | null
@@ -49,6 +57,8 @@ export interface RealtimePostgresChangesFilter {
     event: 'INSERT' | 'UPDATE' | 'DELETE' | '*'
     schema?: string
     table?: string
+    filter?: string
+    filters?: RealtimeFilterExpression[]
 }
 
 export interface PresenceMeta {
@@ -78,13 +88,6 @@ export interface RealtimeSubscription {
     unsubscribe: () => void
 }
 
-/** Query filter */
-export interface QueryFilter {
-    column: string
-    operator: string
-    value: unknown
-}
-
 export interface UpsertOptions {
     onConflict?: string | string[]
 }
@@ -94,10 +97,53 @@ export interface SelectOptions {
     head?: boolean
 }
 
+export interface StorageObjectMetadataInput {
+    tags?: Record<string, string>
+    customMetadata?: Record<string, string>
+}
+
+export interface StorageObjectMetadata extends StorageObjectMetadataInput {
+    contentType: string
+    size: number
+    createdAt: number
+    updatedAt: number
+}
+
+export interface StorageObjectRecord {
+    path: string
+    size: number
+    mimeType: string
+    createdAt: number
+    updatedAt: number
+    uploadedBy: string | null
+    metadata: StorageObjectMetadata
+    policy?: StorageObjectPolicy | null
+}
+
+export interface ResumableUploadSession {
+    id: string
+    projectId: string
+    bucket: string
+    path: string
+    uploadUrl: string
+    statusUrl: string
+    completeUrl: string
+    chunkSize: number
+    uploadedBytes: number
+    totalSize?: number
+    expiresAt: string
+    createdAt: string
+    completed: boolean
+}
+
 /** Upload options */
 export interface UploadOptions {
     contentType?: string
     upsert?: boolean
+    resumable?: boolean
+    chunkSize?: number
+    metadata?: StorageObjectMetadataInput
+    policy?: StorageObjectPolicy
 }
 
 /** Transform options */

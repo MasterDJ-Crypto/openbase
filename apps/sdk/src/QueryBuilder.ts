@@ -180,7 +180,7 @@ export class QueryBuilder<T = Record<string, unknown>> {
         return result.data.count
     }
 
-    private addFilter(column: string, operator: string, value: unknown): this {
+    private addFilter(column: string, operator: QueryFilter['operator'], value: unknown): this {
         this.filters.push({ column, operator, value })
         return this
     }

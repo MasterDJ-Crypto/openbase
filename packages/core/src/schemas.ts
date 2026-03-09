@@ -42,6 +42,56 @@ export const bucketPermissionSchema = z.object({
     userIds: z.array(z.string()).optional(),
 })
 
+export const storageRuleSchema = z.object({
+    effect: z.enum(['allow', 'deny']),
+    actions: z.array(z.enum(['read', 'write', 'delete'])).min(1),
+    expression: z.string().min(1),
+})
+
+export const storageObjectPolicySchema = z.object({
+    public: z.boolean().optional(),
+    read: bucketPermissionSchema.optional(),
+    write: bucketPermissionSchema.optional(),
+    delete: bucketPermissionSchema.optional(),
+    rules: z.array(storageRuleSchema).optional(),
+})
+
+export const storageObjectMetadataSchema = z.object({
+    contentType: z.string(),
+    size: z.number(),
+    createdAt: z.number(),
+    updatedAt: z.number(),
+    tags: z.record(z.string()).optional(),
+    customMetadata: z.record(z.string()).optional(),
+})
+
+export const storageObjectRecordSchema = z.object({
+    path: z.string(),
+    size: z.number(),
+    mimeType: z.string(),
+    createdAt: z.number(),
+    updatedAt: z.number(),
+    uploadedBy: z.string().nullable(),
+    metadata: storageObjectMetadataSchema,
+    policy: storageObjectPolicySchema.nullable().optional(),
+})
+
+export const resumableUploadSessionSchema = z.object({
+    id: z.string(),
+    projectId: z.string(),
+    bucket: z.string(),
+    path: z.string(),
+    uploadUrl: z.string().url(),
+    statusUrl: z.string().url(),
+    completeUrl: z.string().url(),
+    chunkSize: z.number(),
+    uploadedBytes: z.number(),
+    totalSize: z.number().optional(),
+    expiresAt: z.string(),
+    createdAt: z.string(),
+    completed: z.boolean(),
+})
+
 export const bucketPolicySchema = z.object({
     public: z.boolean(),
     allowedMimeTypes: z.array(z.string()).optional(),
@@ -49,6 +99,7 @@ export const bucketPolicySchema = z.object({
     read: bucketPermissionSchema.optional(),
     write: bucketPermissionSchema.optional(),
     delete: bucketPermissionSchema.optional(),
+    rules: z.array(storageRuleSchema).optional(),
 })
 
 export const webhookConfigSchema = z.object({
@@ -189,6 +240,58 @@ export const tableSchemaSchema = z.object({
     columns: z.array(columnDefinitionSchema),
     indexes: z.array(z.string()),
     rls: z.array(rlsPolicySchema).optional(),
+})
+
+export const queryFilterSchema = z.object({
+    column: z.string(),
+    operator: z.enum(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'like', 'ilike', 'in', 'is']),
+    value: z.unknown(),
+})
+
+export const transactionOperationConditionSchema = z.object({
+    filters: z.array(queryFilterSchema).optional(),
+    ifMatchMessageIds: z.array(z.number()).optional(),
+    expectedCount: z.number().int().nonnegative().optional(),
+})
+
+export const transactionOperationSchema = z.discriminatedUnion('type', [
+    z.object({
+        type: z.literal('insert'),
+        table: z.string(),
+        values: z.array(z.record(z.unknown())).min(1),
+    }),
+    z.object({
+        type: z.literal('upsert'),
+        table: z.string(),
+        values: z.array(z.record(z.unknown())).min(1),
+        onConflict: z.array(z.string()).optional(),
+        condition: transactionOperationConditionSchema.optional(),
+    }),
+    z.object({
+        type: z.literal('update'),
+        table: z.string(),
+        patch: z.record(z.unknown()),
+        condition: transactionOperationConditionSchema.optional(),
+    }),
+    z.object({
+        type: z.literal('delete'),
+        table: z.string(),
+        condition: transactionOperationConditionSchema.optional(),
+    }),
+])
+
+export const transactionOperationResultSchema = z.object({
+    type: z.enum(['insert', 'upsert', 'update', 'delete']),
+    table: z.string(),
+    count: z.number(),
+    data: z.array(z.record(z.unknown())).nullable(),
+})
+
+export const transactionResultSchema = z.object({
+    id: z.string(),
+    projectId: z.string(),
+    committedAt: z.string(),
+    operations: z.array(transactionOperationResultSchema),
 })
 
 export const migrationOperationSchema = z.discriminatedUnion('type', [

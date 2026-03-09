@@ -190,6 +190,59 @@ export interface QueryResult<T = Record<string, unknown>> {
     count?: number
 }
 
+export interface TransactionOperationCondition {
+    filters?: QueryFilter[]
+    ifMatchMessageIds?: number[]
+    expectedCount?: number
+}
+
+export interface TransactionInsertOperation {
+    type: 'insert'
+    table: string
+    values: Record<string, unknown>[]
+}
+
+export interface TransactionUpsertOperation {
+    type: 'upsert'
+    table: string
+    values: Record<string, unknown>[]
+    onConflict?: string[]
+    condition?: TransactionOperationCondition
+}
+
+export interface TransactionUpdateOperation {
+    type: 'update'
+    table: string
+    patch: Record<string, unknown>
+    condition?: TransactionOperationCondition
+}
+
+export interface TransactionDeleteOperation {
+    type: 'delete'
+    table: string
+    condition?: TransactionOperationCondition
+}
+
+export type TransactionOperation =
+    | TransactionInsertOperation
+    | TransactionUpsertOperation
+    | TransactionUpdateOperation
+    | TransactionDeleteOperation
+
+export interface TransactionOperationResult {
+    type: TransactionOperation['type']
+    table: string
+    count: number
+    data: Record<string, unknown>[] | null
+}
+
+export interface TransactionResult {
+    id: string
+    projectId: string
+    committedAt: string
+    operations: TransactionOperationResult[]
+}
+
 // ─── Auth Types ──────────────────────────────────────────────
 
 /** JWT payload structure */
@@ -362,6 +415,11 @@ export interface UploadOptions {
     mimeType?: string
     userId?: string
     upsert?: boolean
+    metadata?: {
+        tags?: Record<string, string>
+        customMetadata?: Record<string, string>
+    }
+    policy?: StorageObjectPolicy
 }
 
 /** Image transform options */
@@ -379,6 +437,58 @@ export interface BucketPermission {
     userIds?: string[]
 }
 
+export type StorageAction = 'read' | 'write' | 'delete'
+
+export interface StorageRule {
+    effect: 'allow' | 'deny'
+    actions: StorageAction[]
+    expression: string
+}
+
+export interface StorageObjectPolicy {
+    public?: boolean
+    read?: BucketPermission
+    write?: BucketPermission
+    delete?: BucketPermission
+    rules?: StorageRule[]
+}
+
+export interface StorageObjectMetadata {
+    contentType: string
+    size: number
+    createdAt: number
+    updatedAt: number
+    tags?: Record<string, string>
+    customMetadata?: Record<string, string>
+}
+
+export interface StorageObjectRecord {
+    path: string
+    size: number
+    mimeType: string
+    createdAt: number
+    updatedAt: number
+    uploadedBy: string | null
+    metadata: StorageObjectMetadata
+    policy?: StorageObjectPolicy | null
+}
+
+export interface ResumableUploadSession {
+    id: string
+    projectId: string
+    bucket: string
+    path: string
+    uploadUrl: string
+    statusUrl: string
+    completeUrl: string
+    chunkSize: number
+    uploadedBytes: number
+    totalSize?: number
+    expiresAt: string
+    createdAt: string
+    completed: boolean
+}
+
 export interface BucketPolicy {
     public: boolean
     allowedMimeTypes?: string[]
@@ -386,12 +496,19 @@ export interface BucketPolicy {
     read?: BucketPermission
     write?: BucketPermission
     delete?: BucketPermission
+    rules?: StorageRule[]
 }
 
 // ─── Realtime Types ──────────────────────────────────────────
 
 /** Realtime event types */
 export type RealtimeEventType = 'INSERT' | 'UPDATE' | 'DELETE' | '*'
+
+export interface RealtimeFilterExpression {
+    column: string
+    operator: FilterOperator
+    value: unknown
+}
 
 /** Realtime payload sent to subscribers */
 export interface RealtimePayload<T = Record<string, unknown>> {
@@ -406,6 +523,14 @@ export interface RealtimePayload<T = Record<string, unknown>> {
 /** Realtime subscription */
 export interface RealtimeSubscription {
     unsubscribe: () => void
+}
+
+export interface RealtimePostgresChangesFilter {
+    event: RealtimeEventType
+    schema?: string
+    table?: string
+    filter?: string
+    filters?: RealtimeFilterExpression[]
 }
 
 export interface ApiErrorPayload {

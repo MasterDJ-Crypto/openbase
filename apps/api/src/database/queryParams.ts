@@ -1,5 +1,6 @@
 import type { FastifyRequest } from 'fastify'
 import type { QueryFilter } from '@openbase/core'
+import { parseFilterValue } from './filtering.js'
 
 export interface ParsedDatabaseQuery {
     filters: QueryFilter[]
@@ -35,7 +36,7 @@ export function parseDatabaseRequestQuery(request: FastifyRequest): ParsedDataba
         filters.push({
             column: key,
             operator: operator as QueryFilter['operator'],
-            value: parseOperatorValue(operator, rawValue),
+            value: parseFilterValue(operator as QueryFilter['operator'], rawValue),
         })
     }
 
@@ -68,33 +69,4 @@ export function parseDatabaseRequestQuery(request: FastifyRequest): ParsedDataba
             ? onConflict.split(',').map(column => column.trim()).filter(Boolean)
             : undefined,
     }
-}
-
-function parseOperatorValue(operator: string, rawValue: string): unknown {
-    if (operator === 'in') {
-        return rawValue
-            .replace(/^\(/, '')
-            .replace(/\)$/, '')
-            .split(',')
-            .filter(Boolean)
-            .map(item => parseScalarValue(item))
-    }
-
-    if (operator === 'is') {
-        if (rawValue === 'null') return null
-        if (rawValue === 'true') return true
-        if (rawValue === 'false') return false
-    }
-
-    return parseScalarValue(rawValue)
-}
-
-function parseScalarValue(rawValue: string): unknown {
-    if (rawValue === 'null') return null
-    if (rawValue === 'true') return true
-    if (rawValue === 'false') return false
-    if (/^-?\d+(\.\d+)?$/.test(rawValue)) {
-        return Number(rawValue)
-    }
-    return rawValue
 }

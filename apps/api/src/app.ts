@@ -25,9 +25,11 @@ import {
     registerPlatformRoutes,
     registerProjectRoutes,
     registerStorageRoutes,
+    registerTransactionRoutes,
 } from './routes/index.js'
-import { StorageService } from './storage/index.js'
+import { StorageService, UploadSessionService } from './storage/index.js'
 import { TelegramProviderFactory, TelegramSessionPool } from './telegram/index.js'
+import { TransactionService } from './transactions/index.js'
 import { WarmupService } from './warmup/index.js'
 import { WebhookService } from './webhooks/index.js'
 
@@ -86,6 +88,9 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
 
     await app.register(helmet, { crossOriginResourcePolicy: false })
     await app.register(multipart)
+    app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (_request, payload, done) => {
+        done(null, payload)
+    })
 
     const redis = options.redis ?? new Redis(config.REDIS_URL, {
         maxRetriesPerRequest: null,
@@ -169,6 +174,12 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
 
     const authService = new AuthService(redis, config.JWT_SECRET, encryptionService, masterKey)
     const storageService = new StorageService(config.STORAGE_SECRET, config.API_PUBLIC_URL)
+    const uploadSessionService = new UploadSessionService(
+        redis,
+        `${config.SQLITE_BASE_PATH}/uploads`,
+        config.STORAGE_SECRET,
+        config.API_PUBLIC_URL
+    )
     const requestLogService = new RequestLogService(redis)
     const platformUserRepository = new PlatformUserRepository(`${config.SQLITE_BASE_PATH}/platform.db`)
     const webhookService = new WebhookService(redis, {
@@ -234,8 +245,15 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
         }))
     })
 
-    const realtimeService = new RealtimeService(app.server, config.JWT_SECRET, projectService, {
+    const realtimeService = new RealtimeService(app.server, config.JWT_SECRET, projectService, projectAccessService, authService, {
         allowedOrigins,
+    })
+    const transactionService = new TransactionService(redis, projectService, {
+        getIndexManager,
+        encryptionService,
+        masterKey,
+        realtimeService,
+        webhookService,
     })
 
     app.addHook('onResponse', async request => {
@@ -302,7 +320,8 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
             },
         }
     )
-    registerStorageRoutes(app, storageService, projectService, projectAccessService, authService)
+    registerStorageRoutes(app, storageService, uploadSessionService, projectService, projectAccessService, authService)
+    registerTransactionRoutes(app, projectService, projectAccessService, authService, transactionService)
     registerProjectRoutes(app, projectService, projectAccessService, warmupService, requestLogService, webhookService, operationsLogService, sessionPool)
     registerPlatformRoutes(
         app,

@@ -1,7 +1,16 @@
 import type { Server as HttpServer } from 'http'
-import type { JWTPayload, RealtimePayload, RLSPolicy } from '@openbase/core'
+import type {
+    JWTPayload,
+    QueryFilter,
+    RealtimeFilterExpression,
+    RealtimePayload,
+    RLSPolicy,
+} from '@openbase/core'
 import { Server, Socket } from 'socket.io'
 import jwt from 'jsonwebtoken'
+import type { ProjectAccessService } from '../access/ProjectAccessService.js'
+import type { AuthService } from '../auth/AuthService.js'
+import { applyQueryFilters, parseRealtimeFilterExpression } from '../database/index.js'
 import { checkRLSForRow, findPolicy } from '../middleware/rls.js'
 import type { ProjectService } from '../projects/ProjectService.js'
 
@@ -11,11 +20,23 @@ interface RealtimeOptions {
 
 type TableEventType = 'INSERT' | 'UPDATE' | 'DELETE' | '*'
 
+interface SubscribePayload {
+    channel?: string
+    projectId: string
+    table: string
+    event: TableEventType
+    token?: string
+    filter?: string
+    filters?: RealtimeFilterExpression[]
+}
+
 interface TableSubscription {
     room: string
+    channel: string
     projectId: string
     table: string
     eventType: TableEventType
+    filters: QueryFilter[]
     user: JWTPayload
     selectPolicy?: RLSPolicy
     bypassRLS: boolean
@@ -32,7 +53,6 @@ type PresenceState = Record<string, { metas: PresenceMeta[] }>
 
 export class RealtimeService {
     private readonly io: Server
-    private readonly channelToTable: Map<string, { projectId: string; tableName: string }> = new Map()
     private readonly subscriptions = new Map<string, Map<string, TableSubscription>>()
     private readonly presenceRooms = new Map<string, Map<string, Map<string, PresenceMeta>>>()
     private readonly socketPresenceRooms = new Map<string, Set<string>>()
@@ -41,6 +61,8 @@ export class RealtimeService {
         httpServer: HttpServer,
         private readonly jwtSecret: string,
         private readonly projectService: ProjectService,
+        private readonly projectAccessService: ProjectAccessService,
+        private readonly authService: AuthService,
         options: RealtimeOptions = {}
     ) {
         this.io = new Server(httpServer, {
@@ -62,13 +84,8 @@ export class RealtimeService {
         this.setupConnectionHandler()
     }
 
-    registerProject(
-        projectId: string,
-        channelMap: Record<string, string>
-    ): void {
-        for (const [tableName, channelId] of Object.entries(channelMap)) {
-            this.channelToTable.set(channelId, { projectId, tableName })
-        }
+    registerProject(_projectId: string, _channelMap: Record<string, string>): void {
+        // The realtime bridge still invokes this to mark project availability.
     }
 
     broadcastChange(
@@ -97,13 +114,8 @@ export class RealtimeService {
 
     private setupConnectionHandler(): void {
         this.io.on('connection', (socket: Socket) => {
-            socket.on('subscribe', async (data: {
-                projectId: string
-                table: string
-                event: TableEventType
-                token?: string
-            }) => {
-                const auth = await this.authorizeTableSubscription(data.projectId, data.table, data.token)
+            socket.on('subscribe', async (data: SubscribePayload) => {
+                const auth = await this.authorizeTableSubscription(data)
                 if (!auth) {
                     socket.emit('error', { message: 'Invalid token or insufficient access' })
                     return
@@ -113,14 +125,16 @@ export class RealtimeService {
                 socket.join(room)
                 this.storeSubscription(socket.id, {
                     room,
+                    channel: data.channel || `${data.projectId}:${data.table}`,
                     projectId: data.projectId,
                     table: data.table,
                     eventType: data.event,
+                    filters: auth.filters,
                     user: auth.user,
                     selectPolicy: auth.selectPolicy,
                     bypassRLS: auth.bypassRLS,
                 })
-                socket.emit('subscribed', { room })
+                socket.emit('subscribed', { room, channel: data.channel || `${data.projectId}:${data.table}` })
             })
 
             socket.on('unsubscribe', (data: { projectId: string; table: string; event?: TableEventType }) => {
@@ -139,7 +153,7 @@ export class RealtimeService {
             })
 
             socket.on('join_presence', async (data: { projectId: string; channel: string; token?: string }) => {
-                const payload = await this.verifyProjectToken(data.projectId, data.token)
+                const payload = await this.verifyProjectToken(data.projectId, data.token, 'project.read')
                 if (!payload) {
                     socket.emit('error', { message: 'Invalid token' })
                     return
@@ -156,7 +170,7 @@ export class RealtimeService {
             })
 
             socket.on('leave_presence', async (data: { projectId: string; channel: string; token?: string }) => {
-                const payload = await this.verifyProjectToken(data.projectId, data.token)
+                const payload = await this.verifyProjectToken(data.projectId, data.token, 'project.read')
                 if (!payload) {
                     socket.emit('error', { message: 'Invalid token' })
                     return
@@ -175,7 +189,7 @@ export class RealtimeService {
                 status: string
                 token?: string
             }) => {
-                const payload = await this.verifyProjectToken(data.projectId, data.token)
+                const payload = await this.verifyProjectToken(data.projectId, data.token, 'project.read')
                 if (!payload) {
                     socket.emit('error', { message: 'Invalid token' })
                     return
@@ -207,7 +221,7 @@ export class RealtimeService {
                 payload: unknown
                 token?: string
             }) => {
-                const payload = await this.verifyProjectToken(data.projectId, data.token)
+                const payload = await this.verifyProjectToken(data.projectId, data.token, 'project.read')
                 if (!payload) {
                     socket.emit('error', { message: 'Invalid token' })
                     return
@@ -224,7 +238,7 @@ export class RealtimeService {
             })
 
             socket.on('join_broadcast', async (data: { projectId: string; channel: string; token?: string }) => {
-                const payload = await this.verifyProjectToken(data.projectId, data.token)
+                const payload = await this.verifyProjectToken(data.projectId, data.token, 'project.read')
                 if (!payload) {
                     socket.emit('error', { message: 'Invalid token' })
                     return
@@ -260,59 +274,78 @@ export class RealtimeService {
                 continue
             }
 
-            if (!this.canReceiveRowEvent(subscription, newRow, oldRow)) {
+            if (!this.canReceiveRowEvent(subscription, payload.eventType, newRow, oldRow)) {
                 continue
             }
 
-            socket.emit(eventName, payload)
+            socket.emit(eventName, {
+                ...payload,
+                channel: subscription.channel,
+            })
         }
     }
 
     private canReceiveRowEvent(
         subscription: TableSubscription,
+        eventType: TableEventType,
         newRow: Record<string, unknown> | null,
         oldRow: Record<string, unknown> | null
     ): boolean {
-        if (subscription.bypassRLS || !subscription.selectPolicy) {
-            return true
-        }
+        const candidateRows = eventType === 'DELETE'
+            ? [oldRow]
+            : eventType === 'INSERT'
+                ? [newRow]
+                : [newRow, oldRow]
+        const rows = candidateRows.filter((row): row is Record<string, unknown> => row !== null)
 
-        const rows = [newRow, oldRow].filter((row): row is Record<string, unknown> => row !== null)
         if (rows.length === 0) {
             return false
         }
 
-        return rows.some(row => checkRLSForRow(row, subscription.selectPolicy, subscription.user))
+        if (!subscription.bypassRLS && subscription.selectPolicy && !rows.some(row => checkRLSForRow(row, subscription.selectPolicy, subscription.user))) {
+            return false
+        }
+
+        if (subscription.filters.length === 0) {
+            return true
+        }
+
+        return rows.some(row => applyQueryFilters(row, subscription.filters))
     }
 
     private async authorizeTableSubscription(
-        projectId: string,
-        table: string,
-        token: string | undefined
-    ): Promise<{ user: JWTPayload; selectPolicy?: RLSPolicy; bypassRLS: boolean } | null> {
-        const user = await this.verifyProjectToken(projectId, token)
+        data: SubscribePayload
+    ): Promise<{ user: JWTPayload; selectPolicy?: RLSPolicy; bypassRLS: boolean; filters: QueryFilter[] } | null> {
+        const user = await this.verifyProjectToken(data.projectId, data.token, 'tables.read')
         if (!user) {
             return null
         }
 
-        const schemas = await this.projectService.getSchemas(projectId)
-        const schema = schemas[table]
+        const schemas = await this.projectService.getSchemas(data.projectId)
+        const schema = schemas[data.table]
         if (!schema) {
             return null
         }
 
-        const project = await this.projectService.getProject(projectId)
+        const project = await this.projectService.getProject(data.projectId)
         const bypassRLS = user.role === 'service_role'
             || (user.role === 'platform_user' && user.sub === project.ownerId)
+
+        const filters = resolveSubscriptionFilters(data.filter, data.filters)
 
         return {
             user,
             selectPolicy: findPolicy(schema.rls, 'SELECT'),
             bypassRLS,
+            filters,
         }
     }
 
-    private async verifyProjectToken(projectId: string, token?: string): Promise<JWTPayload | null> {
+    private async verifyProjectToken(
+        projectId: string,
+        token: string | undefined,
+        requiredPermission: 'project.read' | 'tables.read'
+    ): Promise<JWTPayload | null> {
         if (!token) {
             return null
         }
@@ -328,12 +361,21 @@ export class RealtimeService {
             return null
         }
 
-        const project = await this.projectService.getProject(projectId)
         if (payload.role === 'platform_user') {
-            return payload.sub === project.ownerId ? payload : null
+            try {
+                await this.projectAccessService.assertPlatformPermission(projectId, payload, requiredPermission)
+                return payload
+            } catch {
+                return null
+            }
         }
 
-        return payload.projectId === projectId ? payload : null
+        if (payload.projectId !== projectId) {
+            return null
+        }
+
+        const active = await this.authService.isSessionActive(payload)
+        return active ? payload : null
     }
 
     private upsertPresence(
@@ -423,7 +465,7 @@ export class RealtimeService {
     private getTableRoom(projectId: string, table: string, eventType: TableEventType): string {
         return eventType === '*'
             ? `project:${projectId}:table:${table}:*`
-            : `project:${projectId}:table:${table}`
+            : `project:${projectId}:table:${table}:${eventType}`
     }
 
     private recordSocketPresenceRoom(socketId: string, room: string): void {
@@ -461,4 +503,23 @@ export class RealtimeService {
             this.subscriptions.delete(socketId)
         }
     }
+}
+
+function resolveSubscriptionFilters(
+    filter: string | undefined,
+    filters: RealtimeFilterExpression[] | undefined
+): QueryFilter[] {
+    if (filters && filters.length > 0) {
+        return filters.map(entry => ({
+            column: entry.column,
+            operator: entry.operator,
+            value: entry.value,
+        }))
+    }
+
+    if (!filter) {
+        return []
+    }
+
+    return parseRealtimeFilterExpression(filter)
 }

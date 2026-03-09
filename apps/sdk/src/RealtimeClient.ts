@@ -3,6 +3,7 @@ import type {
     PresenceEventPayload,
     PresenceMeta,
     PresenceState,
+    QueryFilter,
     RealtimePayload,
     RealtimePostgresChangesFilter,
     RealtimeSubscription,
@@ -13,9 +14,11 @@ type RealtimeHandlerMode = 'legacy' | 'postgres_changes'
 
 interface SubscriptionDescriptor {
     id: string
+    channel: string
     schema: string
     table: string
     eventType: TableEventType
+    filters: QueryFilter[]
     callback: (payload: RealtimePayload) => void
     mode: RealtimeHandlerMode
 }
@@ -90,6 +93,7 @@ export class RealtimeClient {
                 if (descriptor.schema !== payload.schema) continue
                 if (descriptor.table !== payload.table) continue
                 if (descriptor.eventType !== '*' && descriptor.eventType !== eventName) continue
+                if (payload.channel && payload.channel !== descriptor.channel) continue
                 descriptor.callback(payload)
             }
         })
@@ -139,16 +143,18 @@ export class RealtimeClient {
     }
 
     subscribeToTable(
+        channel: string,
         schema: string,
         table: string,
         eventType: TableEventType,
+        filters: QueryFilter[],
         callback: (payload: RealtimePayload) => void,
         mode: RealtimeHandlerMode = 'legacy'
     ): RealtimeSubscription {
         this.connect()
 
-        const id = `${table}:${eventType}:${Math.random().toString(36).slice(2)}`
-        const descriptor: SubscriptionDescriptor = { id, schema, table, eventType, callback, mode }
+        const id = `${channel}:${table}:${eventType}:${Math.random().toString(36).slice(2)}`
+        const descriptor: SubscriptionDescriptor = { id, channel, schema, table, eventType, filters, callback, mode }
         const shouldSubscribe = !this.hasMatchingDescriptor(descriptor)
         this.descriptors.set(id, descriptor)
         if (shouldSubscribe) {
@@ -266,9 +272,11 @@ export class RealtimeClient {
         if (!this.socket?.connected) return
 
         this.socket.emit('subscribe', {
+            channel: descriptor.channel,
             projectId: this.projectId,
             table: descriptor.table,
             event: descriptor.eventType,
+            filter: descriptor.filters.length > 0 ? serializeRealtimeFilters(descriptor.filters) : undefined,
             token: this.getAuthToken(),
         })
     }
@@ -359,7 +367,7 @@ export class RealtimeClient {
         return this.getAccessToken() || this.getApiKey()
     }
 
-    private hasMatchingDescriptor(descriptor: Pick<SubscriptionDescriptor, 'schema' | 'table' | 'eventType' | 'id'>): boolean {
+    private hasMatchingDescriptor(descriptor: Pick<SubscriptionDescriptor, 'channel' | 'schema' | 'table' | 'eventType' | 'filters' | 'id'>): boolean {
         for (const current of this.descriptors.values()) {
             if (current.id === descriptor.id) {
                 continue
@@ -373,9 +381,14 @@ export class RealtimeClient {
         return false
     }
 
-    private getDescriptorKey(descriptor: Pick<SubscriptionDescriptor, 'schema' | 'table' | 'eventType'>): string {
-        const roomType = descriptor.eventType === '*' ? '*' : 'table'
-        return `${descriptor.schema}:${descriptor.table}:${roomType}`
+    private getDescriptorKey(descriptor: Pick<SubscriptionDescriptor, 'channel' | 'schema' | 'table' | 'eventType' | 'filters'>): string {
+        return [
+            descriptor.channel,
+            descriptor.schema,
+            descriptor.table,
+            descriptor.eventType,
+            serializeRealtimeFilters(descriptor.filters),
+        ].join(':')
     }
 
     private isRealtimeEvent(eventName: string): eventName is TableEventType {
@@ -391,6 +404,7 @@ export class RealtimeChannel {
         schema: string
         table: string
         eventType: TableEventType
+        filters: QueryFilter[]
         callback: (payload: RealtimePayload) => void
         mode: RealtimeHandlerMode
     }> = []
@@ -404,7 +418,7 @@ export class RealtimeChannel {
 
     on(
         eventType: TableEventType,
-        filter: { event: string; schema?: string; table?: string } | string,
+        filter: { event: string; schema?: string; table?: string; filter?: string; filters?: QueryFilter[] } | string,
         callback: (payload: RealtimePayload) => void
     ): this
     on(
@@ -414,7 +428,7 @@ export class RealtimeChannel {
     ): this
     on(
         eventType: TableEventType | 'postgres_changes',
-        filter: { event: string; schema?: string; table?: string } | RealtimePostgresChangesFilter | string,
+        filter: { event: string; schema?: string; table?: string; filter?: string; filters?: QueryFilter[] } | RealtimePostgresChangesFilter | string,
         callback: (payload: RealtimePayload) => void
     ): this {
         if (eventType === 'postgres_changes') {
@@ -425,15 +439,28 @@ export class RealtimeChannel {
                 schema: postgresFilter.schema || 'public',
                 table,
                 eventType: postgresEvent,
+                filters: postgresFilter.filters || parseFilterString(postgresFilter.filter),
                 callback,
                 mode: 'postgres_changes',
             })
             return this
         }
 
-        const table = typeof filter === 'string' ? filter : filter.table || this.name
-        const schema = typeof filter === 'string' ? 'public' : filter.schema || 'public'
-        this.handlers.push({ schema, table, eventType, callback, mode: 'legacy' })
+        const parsedFilter = typeof filter === 'string'
+            ? { table: filter, schema: 'public', filters: [] as QueryFilter[] }
+            : {
+                table: filter.table || this.name,
+                schema: filter.schema || 'public',
+                filters: filter.filters || parseFilterString(filter.filter),
+            }
+        this.handlers.push({
+            schema: parsedFilter.schema,
+            table: parsedFilter.table,
+            eventType,
+            filters: parsedFilter.filters,
+            callback,
+            mode: 'legacy',
+        })
         return this
     }
 
@@ -449,7 +476,7 @@ export class RealtimeChannel {
 
     subscribe(): RealtimeSubscription {
         const subscriptions = this.handlers.map(handler =>
-            this.client.subscribeToTable(handler.schema, handler.table, handler.eventType, handler.callback, handler.mode)
+            this.client.subscribeToTable(this.name, handler.schema, handler.table, handler.eventType, handler.filters, handler.callback, handler.mode)
         )
         const broadcastSubscriptions = this.broadcastCallbacks.map(callback =>
             this.client.subscribeToBroadcast(this.name, callback)
@@ -521,4 +548,46 @@ function clonePresenceState(state: PresenceState): PresenceState {
             },
         ])
     )
+}
+
+function parseFilterString(filter: string | undefined): QueryFilter[] {
+    if (!filter) {
+        return []
+    }
+
+    const normalized = filter.startsWith('?') ? filter.slice(1) : filter
+    const params = new URLSearchParams(normalized)
+    return [...params.entries()].map(([column, encoded]) => {
+        const dotIndex = encoded.indexOf('.')
+        const operator = encoded.slice(0, dotIndex)
+        const rawValue = encoded.slice(dotIndex + 1)
+        return {
+            column,
+            operator,
+            value: parseFilterValue(rawValue),
+        } as QueryFilter
+    })
+}
+
+function parseFilterValue(rawValue: string): unknown {
+    if (rawValue === 'null') return null
+    if (rawValue === 'true') return true
+    if (rawValue === 'false') return false
+    if (/^-?\d+(\.\d+)?$/.test(rawValue)) {
+        return Number(rawValue)
+    }
+    return rawValue
+}
+
+function serializeRealtimeFilters(filters: QueryFilter[]): string {
+    const params = new URLSearchParams()
+    for (const filter of filters) {
+        const value = Array.isArray(filter.value)
+            ? `(${filter.value.join(',')})`
+            : filter.value === null
+                ? 'null'
+                : String(filter.value)
+        params.append(filter.column, `${filter.operator}.${value}`)
+    }
+    return params.toString()
 }

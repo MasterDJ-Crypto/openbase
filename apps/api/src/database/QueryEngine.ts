@@ -7,6 +7,7 @@ import type { QueryFilter, QueryOptions, TableSchema, TelegramMessage } from '@o
 import { ConflictError, safeJsonParse } from '@openbase/core'
 import type { StorageProvider } from '@openbase/telegram'
 import type { IndexManager } from './IndexManager.js'
+import { applyQueryFilters } from './filtering.js'
 
 interface QueryEngineOptions {
     encodeValue?: (columnName: string, value: unknown) => unknown
@@ -85,7 +86,7 @@ export class QueryEngine {
                 ? options.filters.filter(filter => filter !== indexedFilter)
                 : options.filters
 
-            rows = rows.filter(row => this.applyFilters(row, filtersToApply))
+            rows = rows.filter(row => applyQueryFilters(row, filtersToApply))
         }
 
         if (options.orderBy) {
@@ -318,38 +319,6 @@ export class QueryEngine {
         }
     }
 
-    private applyFilters(row: Record<string, unknown>, filters: QueryFilter[]): boolean {
-        return filters.every(filter => {
-            const value = row[filter.column]
-            switch (filter.operator) {
-                case 'eq':
-                    return value === filter.value
-                case 'neq':
-                    return value !== filter.value
-                case 'gt':
-                    return this.toComparable(value) > this.toComparable(filter.value)
-                case 'gte':
-                    return this.toComparable(value) >= this.toComparable(filter.value)
-                case 'lt':
-                    return this.toComparable(value) < this.toComparable(filter.value)
-                case 'lte':
-                    return this.toComparable(value) <= this.toComparable(filter.value)
-                case 'like':
-                    return String(value ?? '').includes(String(filter.value).replace(/%/g, ''))
-                case 'ilike':
-                    return String(value ?? '').toLowerCase().includes(
-                        String(filter.value).replace(/%/g, '').toLowerCase()
-                    )
-                case 'in':
-                    return Array.isArray(filter.value) && filter.value.includes(value)
-                case 'is':
-                    return filter.value === null ? value === null || value === undefined : value === filter.value
-                default:
-                    return false
-            }
-        })
-    }
-
     private validateRow(data: Record<string, unknown>): void {
         for (const column of this.schema.columns) {
             const value = data[column.name]
@@ -423,7 +392,6 @@ export class QueryEngine {
             Object.entries(row).map(([columnName, value]) => [columnName, this.options.decodeValue?.(columnName, value) ?? value])
         )
     }
-
     private compareValues(left: unknown, right: unknown, ascending: boolean): number {
         if (left === right) return 0
         if (left === null || left === undefined) return ascending ? 1 : -1

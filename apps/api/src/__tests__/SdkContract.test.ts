@@ -27,6 +27,7 @@ describe('SDK contract coverage', () => {
             columns: [
                 { name: 'id', type: 'uuid', required: true, unique: true },
                 { name: 'title', type: 'text', required: true },
+                { name: 'status', type: 'text' },
             ],
             indexes: ['id'],
         })
@@ -47,7 +48,7 @@ describe('SDK contract coverage', () => {
         expect(signInResult.error).toBeNull()
         expect(signInResult.data?.user.email).toBe('sdk-user@example.com')
 
-        const insertResult = await admin.from('posts').insert({ title: 'hello from sdk' })
+        const insertResult = await admin.from('posts').insert({ title: 'hello from sdk', status: 'draft' })
         expect(insertResult.error).toBeNull()
 
         const selectResult = await client.from('posts').select('*', { count: 'exact' })
@@ -65,16 +66,45 @@ describe('SDK contract coverage', () => {
 
         const uploadResult = await client.storage
             .from('contracts')
-            .upload('reports/sdk-contract.txt', new Blob(['contract data'], { type: 'text/plain' }))
+            .upload('reports/sdk-contract.txt', new Blob(['contract data'], { type: 'text/plain' }), {
+                metadata: {
+                    tags: { source: 'sdk' },
+                    customMetadata: { contract: 'true' },
+                },
+            })
         expect(uploadResult.error).toBeNull()
 
         const listResult = await client.storage.from('contracts').list('reports/')
         expect(listResult.error).toBeNull()
         expect(listResult.data?.[0]?.path).toBe('reports/sdk-contract.txt')
+        expect(listResult.data?.[0]?.metadata.tags?.source).toBe('sdk')
 
         const downloadResult = await client.storage.from('contracts').download('reports/sdk-contract.txt')
         expect(downloadResult.error).toBeNull()
         expect(await downloadResult.data?.text()).toBe('contract data')
+
+        const infoResult = await client.storage.from('contracts').info('reports/sdk-contract.txt')
+        expect(infoResult.error).toBeNull()
+        expect(infoResult.data?.metadata.customMetadata?.contract).toBe('true')
+
+        const transactionResult = await admin.transaction([
+            {
+                type: 'update',
+                table: 'posts',
+                patch: { status: 'live' },
+                condition: {
+                    filters: [{ column: 'title', operator: 'eq', value: 'hello from sdk' }],
+                    expectedCount: 1,
+                },
+            },
+            {
+                type: 'insert',
+                table: 'posts',
+                values: [{ title: 'from transaction', status: 'live' }],
+            },
+        ])
+        expect(transactionResult.error).toBeNull()
+        expect(transactionResult.data?.operations).toHaveLength(2)
 
         const socketEvents: Array<{ table: string; title?: string }> = []
         const subscription = client
@@ -83,6 +113,7 @@ describe('SDK contract coverage', () => {
                 event: 'INSERT',
                 schema: 'public',
                 table: 'posts',
+                filter: 'status=eq.live',
             }, (payload: { table: string; new?: { title?: unknown } }) => {
                 socketEvents.push({
                     table: payload.table,
@@ -92,7 +123,8 @@ describe('SDK contract coverage', () => {
             .subscribe()
 
         await new Promise(resolve => setTimeout(resolve, 100))
-        await admin.from('posts').insert({ title: 'realtime from sdk' })
+        await admin.from('posts').insert({ title: 'ignore me', status: 'draft' })
+        await admin.from('posts').insert({ title: 'realtime from sdk', status: 'live' })
         await waitForCondition(() => socketEvents.length > 0)
 
         expect(socketEvents[0]).toEqual({

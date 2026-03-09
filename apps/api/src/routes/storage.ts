@@ -1,5 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify'
-import type { BucketPermission, BucketPolicy, Project } from '@openbase/core'
+import { createReadStream } from 'fs'
+import type { BucketPolicy, Project, StorageAction, StorageObjectPolicy } from '@openbase/core'
+import { bucketPolicySchema, storageObjectPolicySchema } from '@openbase/core'
 import { ConflictError, ForbiddenError } from '@openbase/core'
 import { z } from 'zod'
 import type { ProjectAccessService } from '../access/ProjectAccessService.js'
@@ -7,10 +9,20 @@ import type { AuthService } from '../auth/AuthService.js'
 import { authMiddleware, optionalAuthMiddleware } from '../middleware/auth.js'
 import type { ProjectService } from '../projects/ProjectService.js'
 import type { StorageService } from '../storage/StorageService.js'
+import type { UploadSessionService } from '../storage/UploadSessionService.js'
+import { isStorageAccessAllowed } from '../storage/policyEngine.js'
+
+const storageMetadataInputSchema = z.object({
+    tags: z.record(z.string()).optional(),
+    customMetadata: z.record(z.string()).optional(),
+})
 
 const createBucketSchema = z.object({
     name: z.string().min(1).max(64).regex(/^[a-z][a-z0-9_-]*$/),
     public: z.boolean().optional().default(false),
+    allowedMimeTypes: z.array(z.string()).optional(),
+    maxFileSize: z.number().positive().optional(),
+    rules: storageObjectPolicySchema.shape.rules.optional(),
 })
 
 const signedUrlSchema = z.object({
@@ -19,11 +31,29 @@ const signedUrlSchema = z.object({
     expiresIn: z.number().min(1).max(604800).default(3600),
 })
 
+const createUploadSessionSchema = z.object({
+    bucket: z.string().min(1),
+    path: z.string().min(1),
+    mimeType: z.string().default('application/octet-stream'),
+    totalSize: z.number().nonnegative().optional(),
+    expiresIn: z.number().min(60).max(86400).default(3600),
+    upsert: z.boolean().optional().default(false),
+    chunkSize: z.number().min(1024 * 256).max(32 * 1024 * 1024).optional(),
+    metadata: storageMetadataInputSchema.optional(),
+    policy: storageObjectPolicySchema.optional(),
+})
+
+const updateObjectSchema = z.object({
+    metadata: storageMetadataInputSchema.optional(),
+    policy: storageObjectPolicySchema.nullable().optional(),
+})
+
 type BucketAction = 'read' | 'write' | 'delete'
 
 export function registerStorageRoutes(
     app: FastifyInstance,
     storageService: StorageService,
+    uploadSessionService: UploadSessionService,
     projectService: ProjectService,
     projectAccessService: ProjectAccessService,
     authService: AuthService
@@ -41,7 +71,13 @@ export function registerStorageRoutes(
 
             return projectService.withProjectStorageRecord(project, async (_project, provider) => {
                 const channel = await storageService.createBucket(provider, body.name, { public: body.public })
-                const policy = storageService.createBucketPolicy({ public: body.public })
+                const basePolicy = storageService.createBucketPolicy({ public: body.public })
+                const policy: BucketPolicy = {
+                    ...basePolicy,
+                    ...(body.allowedMimeTypes ? { allowedMimeTypes: body.allowedMimeTypes } : {}),
+                    ...(body.maxFileSize !== undefined ? { maxFileSize: body.maxFileSize } : {}),
+                    ...(body.rules ? { rules: body.rules } : {}),
+                }
 
                 project.buckets[body.name] = channel
                 project.bucketPolicies[body.name] = policy
@@ -57,11 +93,145 @@ export function registerStorageRoutes(
         }
     )
 
+    app.get<{ Params: { projectId: string; bucket: string } }>(
+        '/api/v1/:projectId/storage/buckets/:bucket/policy',
+        { preHandler: [authMiddleware] },
+        async (request, reply) => {
+            const project = await getProjectForStorageAction(projectService, projectAccessService, authService, request, request.params.bucket, 'read')
+            return reply.send({
+                data: getBucketPolicy(project, request.params.bucket),
+            })
+        }
+    )
+
+    app.patch<{ Params: { projectId: string; bucket: string } }>(
+        '/api/v1/:projectId/storage/buckets/:bucket/policy',
+        { preHandler: [authMiddleware] },
+        async (request, reply) => {
+            const project = await assertProjectAdminAccess(projectService, projectAccessService, request)
+            if (!project.buckets[request.params.bucket]) {
+                return reply.status(404).send({ error: { message: `Bucket "${request.params.bucket}" not found` } })
+            }
+
+            const policy = bucketPolicySchema.parse(request.body)
+            project.bucketPolicies[request.params.bucket] = policy
+            await projectService.updateProject(project.id, { bucketPolicies: project.bucketPolicies })
+            return reply.send({ data: policy })
+        }
+    )
+
+    app.post<{ Params: { projectId: string } }>(
+        '/api/v1/:projectId/storage/uploads',
+        { preHandler: [authMiddleware] },
+        async (request, reply) => {
+            const body = createUploadSessionSchema.parse(request.body)
+            const project = await getProjectForStorageAction(projectService, projectAccessService, authService, request, body.bucket, 'write')
+            const bucketChannel = project.buckets[body.bucket]
+            if (!bucketChannel) {
+                return reply.status(404).send({ error: { message: `Bucket "${body.bucket}" not found` } })
+            }
+
+            const policy = getBucketPolicy(project, body.bucket)
+            ensureBucketAccess(project, body.bucket, 'write', request.user)
+            assertUploadConstraints(policy, body.mimeType, body.totalSize)
+
+            const session = await uploadSessionService.createSession({
+                projectId: project.id,
+                bucket: body.bucket,
+                path: body.path,
+                totalSize: body.totalSize,
+                mimeType: body.mimeType,
+                userId: request.user?.sub || null,
+                upsert: body.upsert,
+                metadata: body.metadata,
+                policy: body.policy,
+                ttlSeconds: body.expiresIn,
+                chunkSize: body.chunkSize,
+            })
+
+            return reply.status(201).send({ data: session })
+        }
+    )
+
+    app.get<{ Params: { uploadId: string }; Querystring: { token?: string } }>(
+        '/api/v1/storage/uploads/:uploadId',
+        async (request, reply) => {
+            const token = getUploadToken(request)
+            const session = await uploadSessionService.getSession(request.params.uploadId, token)
+            return reply.send({ data: session })
+        }
+    )
+
+    app.patch<{ Params: { uploadId: string }; Querystring: { token?: string } }>(
+        '/api/v1/storage/uploads/:uploadId',
+        async (request, reply) => {
+            const token = getUploadToken(request)
+            const offset = parseUploadOffset(request)
+            const chunk = coerceBodyToBuffer(request.body)
+            const session = await uploadSessionService.appendChunk(request.params.uploadId, token, offset, chunk)
+            return reply.send({
+                data: session,
+                meta: {
+                    range: `${offset}-${session.uploadedBytes - 1}`,
+                },
+            })
+        }
+    )
+
+    app.post<{ Params: { uploadId: string }; Querystring: { token?: string } }>(
+        '/api/v1/storage/uploads/:uploadId/complete',
+        async (request, reply) => {
+            const token = getUploadToken(request)
+            const result = await uploadSessionService.completeSession(request.params.uploadId, token, async (session, filePath) => {
+                const project = await projectService.getProject(session.projectId)
+                const bucketChannel = project.buckets[session.bucket]
+                if (!bucketChannel) {
+                    throw new ForbiddenError(`Bucket "${session.bucket}" not found`)
+                }
+
+                const policy = getBucketPolicy(project, session.bucket)
+                assertUploadConstraints(policy, session.mimeType, session.totalSize)
+
+                return projectService.withProjectStorageRecord(project, async (_project, provider) => {
+                    const upload = await storageService.uploadStream(
+                        provider,
+                        project.id,
+                        session.bucket,
+                        bucketChannel,
+                        project.storageIndexChannel,
+                        session.path,
+                        createFileStream(filePath),
+                        {
+                            mimeType: session.mimeType,
+                            userId: session.userId || undefined,
+                            upsert: session.upsert,
+                            metadata: session.metadata,
+                            policy: session.policy,
+                        }
+                    )
+
+                    return upload
+                })
+            })
+
+            return reply.status(201).send({ data: result })
+        }
+    )
+
+    app.delete<{ Params: { uploadId: string }; Querystring: { token?: string } }>(
+        '/api/v1/storage/uploads/:uploadId',
+        async (request, reply) => {
+            const token = getUploadToken(request)
+            await uploadSessionService.abortSession(request.params.uploadId, token)
+            return reply.send({ data: { message: 'Upload session aborted' } })
+        }
+    )
+
     app.post<{ Params: { projectId: string; bucket: string; '*': string } }>(
         '/api/v1/:projectId/storage/:bucket/*',
         { preHandler: [authMiddleware] },
         async (request, reply) => {
-            const project = await getAuthorizedBucketProject(projectService, projectAccessService, authService, request, request.params.bucket, 'write')
+            const project = await getProjectForStorageAction(projectService, projectAccessService, authService, request, request.params.bucket, 'write')
             const { bucket } = request.params
             const filePath = request.params['*']
             const bucketChannel = project.buckets[bucket]
@@ -74,6 +244,9 @@ export function registerStorageRoutes(
             if (!file) {
                 return reply.status(400).send({ error: { message: 'No file provided' } })
             }
+
+            ensureBucketAccess(project, bucket, 'write', request.user)
+            assertUploadConstraints(getBucketPolicy(project, bucket), file.mimetype, undefined)
 
             return projectService.withProjectStorageRecord(project, async (_project, provider) => {
                 const result = await storageService.uploadStream(
@@ -100,7 +273,7 @@ export function registerStorageRoutes(
         '/api/v1/:projectId/storage/:bucket/*',
         { preHandler: [optionalAuthMiddleware] },
         async (request, reply) => {
-            const project = await getAuthorizedBucketProject(projectService, projectAccessService, authService, request, request.params.bucket, 'read')
+            const project = await getProjectForStorageAction(projectService, projectAccessService, authService, request, request.params.bucket, 'read')
             const { bucket } = request.params
             const filePath = request.params['*']
             const bucketChannel = project.buckets[bucket]
@@ -108,8 +281,6 @@ export function registerStorageRoutes(
             if (!bucketChannel) {
                 return reply.status(404).send({ error: { message: `Bucket "${bucket}" not found` } })
             }
-
-            const isPublic = getBucketPolicy(project, bucket).public === true
 
             return projectService.withProjectStorageRecord(project, async (_project, provider) => {
                 const fileManifest = await storageService.findFile(
@@ -123,6 +294,8 @@ export function registerStorageRoutes(
                 if (!fileManifest) {
                     return reply.status(404).send({ error: { message: 'File not found' } })
                 }
+
+                ensureObjectAccess(project, bucket, 'read', request.user, fileManifest)
 
                 const transformOptions = getTransformOptions(request.query as {
                     width?: string
@@ -139,8 +312,84 @@ export function registerStorageRoutes(
                 return reply
                     .header('Content-Type', mimeType)
                     .header('Content-Length', fileData.length)
-                    .header('Cache-Control', isPublic ? 'public, max-age=3600' : 'private, max-age=0')
+                    .header('Cache-Control', getBucketPolicy(project, bucket).public ? 'public, max-age=3600' : 'private, max-age=0')
                     .send(fileData)
+            })
+        }
+    )
+
+    app.get<{ Params: { projectId: string; bucket: string; '*': string } }>(
+        '/api/v1/:projectId/storage/:bucket/metadata/*',
+        { preHandler: [optionalAuthMiddleware] },
+        async (request, reply) => {
+            const project = await getProjectForStorageAction(projectService, projectAccessService, authService, request, request.params.bucket, 'read')
+            const bucketChannel = project.buckets[request.params.bucket]
+            if (!bucketChannel) {
+                return reply.status(404).send({ error: { message: `Bucket "${request.params.bucket}" not found` } })
+            }
+
+            return projectService.withProjectStorageRecord(project, async (_project, provider) => {
+                const fileManifest = await storageService.findFile(
+                    provider,
+                    project.storageIndexChannel,
+                    request.params.bucket,
+                    bucketChannel,
+                    request.params['*']
+                )
+
+                if (!fileManifest) {
+                    return reply.status(404).send({ error: { message: 'File not found' } })
+                }
+
+                ensureObjectAccess(project, request.params.bucket, 'read', request.user, fileManifest)
+                return reply.send({
+                    data: {
+                        path: fileManifest.path,
+                        size: fileManifest.size,
+                        mimeType: fileManifest.mimeType,
+                        createdAt: fileManifest.createdAt,
+                        updatedAt: fileManifest.updatedAt,
+                        uploadedBy: fileManifest.uploadedBy,
+                        metadata: fileManifest.metadata,
+                        policy: fileManifest.policy ?? null,
+                    },
+                })
+            })
+        }
+    )
+
+    app.patch<{ Params: { projectId: string; bucket: string; '*': string } }>(
+        '/api/v1/:projectId/storage/:bucket/metadata/*',
+        { preHandler: [authMiddleware] },
+        async (request, reply) => {
+            const project = await getProjectForStorageAction(projectService, projectAccessService, authService, request, request.params.bucket, 'write')
+            const bucketChannel = project.buckets[request.params.bucket]
+            if (!bucketChannel) {
+                return reply.status(404).send({ error: { message: `Bucket "${request.params.bucket}" not found` } })
+            }
+
+            const body = updateObjectSchema.parse(request.body)
+            return projectService.withProjectStorageRecord(project, async (_project, provider) => {
+                const fileManifest = await storageService.findFile(
+                    provider,
+                    project.storageIndexChannel,
+                    request.params.bucket,
+                    bucketChannel,
+                    request.params['*']
+                )
+
+                if (!fileManifest) {
+                    return reply.status(404).send({ error: { message: 'File not found' } })
+                }
+
+                ensureObjectAccess(project, request.params.bucket, 'write', request.user, fileManifest)
+                const updated = await storageService.updateObject(
+                    provider,
+                    project.storageIndexChannel,
+                    fileManifest.manifestMessageId,
+                    body
+                )
+                return reply.send({ data: updated })
             })
         }
     )
@@ -149,7 +398,7 @@ export function registerStorageRoutes(
         '/api/v1/:projectId/storage/:bucket',
         { preHandler: [optionalAuthMiddleware] },
         async (request, reply) => {
-            const project = await getAuthorizedBucketProject(projectService, projectAccessService, authService, request, request.params.bucket, 'read')
+            const project = await getProjectForStorageAction(projectService, projectAccessService, authService, request, request.params.bucket, 'read')
             const { bucket } = request.params
             const { prefix } = request.query as { prefix?: string }
             const bucketChannel = project.buckets[bucket]
@@ -167,7 +416,9 @@ export function registerStorageRoutes(
                     prefix
                 )
 
-                return reply.send({ data: files })
+                return reply.send({
+                    data: files.filter(file => isStorageAccessAllowed(bucket, 'read', getBucketPolicy(project, bucket), request.user, file)),
+                })
             })
         }
     )
@@ -176,7 +427,7 @@ export function registerStorageRoutes(
         '/api/v1/:projectId/storage/:bucket/*',
         { preHandler: [authMiddleware] },
         async (request, reply) => {
-            const project = await getAuthorizedBucketProject(projectService, projectAccessService, authService, request, request.params.bucket, 'delete')
+            const project = await getProjectForStorageAction(projectService, projectAccessService, authService, request, request.params.bucket, 'delete')
             const { bucket } = request.params
             const filePath = request.params['*']
             const bucketChannel = project.buckets[bucket]
@@ -197,6 +448,8 @@ export function registerStorageRoutes(
                 if (!fileManifest) {
                     return reply.status(404).send({ error: { message: 'File not found' } })
                 }
+
+                ensureObjectAccess(project, bucket, 'delete', request.user, fileManifest)
 
                 await storageService.deleteFile(
                     provider,
@@ -215,7 +468,7 @@ export function registerStorageRoutes(
         { preHandler: [authMiddleware] },
         async (request, reply) => {
             const body = signedUrlSchema.parse(request.body)
-            const project = await getAuthorizedBucketProject(projectService, projectAccessService, authService, request, body.bucket, 'read')
+            const project = await getProjectForStorageAction(projectService, projectAccessService, authService, request, body.bucket, 'read')
 
             if (!project.buckets[body.bucket]) {
                 return reply.status(404).send({ error: { message: `Bucket "${body.bucket}" not found` } })
@@ -280,7 +533,7 @@ export function registerStorageRoutes(
     )
 }
 
-async function getAuthorizedBucketProject(
+async function getProjectForStorageAction(
     projectService: ProjectService,
     projectAccessService: ProjectAccessService,
     authService: AuthService,
@@ -300,70 +553,67 @@ async function getAuthorizedBucketProject(
         return project
     }
 
-    const policy = getBucketPolicy(project, bucketName)
-    if (await isBucketAccessAllowed(project, policy, authService, user, action)) {
+    if (!user) {
         return project
     }
 
-    throw new ForbiddenError(`You do not have ${action} access to bucket "${bucketName}"`)
+    if (user.projectId !== project.id) {
+        throw new ForbiddenError(`You do not have ${action} access to bucket "${bucketName}"`)
+    }
+
+    const active = await authService.isSessionActive(user)
+    if (!active) {
+        throw new ForbiddenError('Your session is no longer active')
+    }
+
+    return project
 }
 
 function getBucketPolicy(project: Project, bucketName: string): BucketPolicy {
     return project.bucketPolicies[bucketName] ?? { public: false }
 }
 
-async function isBucketAccessAllowed(
+function ensureObjectAccess(
     project: Project,
-    policy: BucketPolicy,
-    authService: AuthService,
+    bucketName: string,
+    action: StorageAction,
     user: FastifyRequest['user'],
-    action: BucketAction
-): Promise<boolean> {
-    const permission = getPermission(policy, action)
-
-    if (action === 'read' && (permission.public === true || policy.public === true)) {
-        return true
+    file: {
+        path: string
+        size: number
+        mimeType: string
+        createdAt: number
+        updatedAt: number
+        uploadedBy: string | null
+        metadata: { contentType: string; size: number; createdAt: number; updatedAt: number; tags?: Record<string, string>; customMetadata?: Record<string, string> }
+        policy?: StorageObjectPolicy | null
     }
+): void {
+    const allowed = isStorageAccessAllowed(bucketName, action, getBucketPolicy(project, bucketName), user, {
+        path: file.path,
+        size: file.size,
+        mimeType: file.mimeType,
+        createdAt: file.createdAt,
+        updatedAt: file.updatedAt,
+        uploadedBy: file.uploadedBy,
+        metadata: file.metadata,
+        policy: file.policy ?? null,
+    })
 
-    if (!user) {
-        return false
+    if (!allowed) {
+        throw new ForbiddenError(`You do not have ${action} access to "${file.path}"`)
     }
-
-    if (user.role === 'platform_user') {
-        return false
-    }
-
-    if (user.projectId !== project.id) {
-        return false
-    }
-
-    const active = await authService.isSessionActive(user)
-    if (!active) {
-        return false
-    }
-
-    if (user.role === 'service_role') {
-        return true
-    }
-
-    if (permission.userIds?.includes(user.sub || '')) {
-        return true
-    }
-
-    return permission.roles?.includes(user.role) === true
 }
 
-function getPermission(policy: BucketPolicy, action: BucketAction): BucketPermission {
-    const permission = policy[action]
-    if (permission) {
-        return permission
+function ensureBucketAccess(
+    project: Project,
+    bucketName: string,
+    action: StorageAction,
+    user: FastifyRequest['user']
+): void {
+    if (!isStorageAccessAllowed(bucketName, action, getBucketPolicy(project, bucketName), user)) {
+        throw new ForbiddenError(`You do not have ${action} access to bucket "${bucketName}"`)
     }
-
-    if (action === 'read' && policy.public) {
-        return { public: true, roles: ['anon', 'authenticated', 'service_role', 'platform_user'] }
-    }
-
-    return { roles: ['authenticated', 'service_role', 'platform_user'] }
 }
 
 async function assertProjectAdminAccess(
@@ -411,4 +661,45 @@ function getTransformOptions(query: { width?: string; height?: string; format?: 
         height: query.height ? parseInt(query.height, 10) : undefined,
         format: query.format as 'jpeg' | 'png' | 'webp' | 'avif' | undefined,
     }
+}
+
+function getUploadToken(request: FastifyRequest<{ Querystring?: { token?: string } }>): string {
+    const token = typeof request.query === 'object' ? (request.query as { token?: string }).token : undefined
+    if (!token) {
+        throw new ForbiddenError('Missing signed upload token')
+    }
+    return token
+}
+
+function parseUploadOffset(request: FastifyRequest): number {
+    const raw = request.headers['x-openbase-upload-offset']
+    const value = Array.isArray(raw) ? raw[0] : raw
+    const parsed = value ? Number(value) : 0
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+}
+
+function coerceBodyToBuffer(body: unknown): Buffer {
+    if (Buffer.isBuffer(body)) {
+        return body
+    }
+
+    if (typeof body === 'string') {
+        return Buffer.from(body)
+    }
+
+    throw new ForbiddenError('Upload chunk body must be a binary payload')
+}
+
+function assertUploadConstraints(policy: BucketPolicy, mimeType: string, totalSize?: number): void {
+    if (policy.allowedMimeTypes?.length && !policy.allowedMimeTypes.includes(mimeType)) {
+        throw new ForbiddenError(`Bucket policy does not allow uploads with MIME type "${mimeType}"`)
+    }
+
+    if (policy.maxFileSize !== undefined && totalSize !== undefined && totalSize > policy.maxFileSize) {
+        throw new ForbiddenError(`Bucket policy limits uploads to ${policy.maxFileSize} bytes`)
+    }
+}
+
+function createFileStream(filePath: string): AsyncIterable<Buffer> {
+    return createReadStream(filePath) as unknown as AsyncIterable<Buffer>
 }

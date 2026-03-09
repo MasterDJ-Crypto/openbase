@@ -1,5 +1,14 @@
 import jwt from 'jsonwebtoken'
-import type { BucketPolicy, FileRef, TelegramChannelRef, TransformOptions, UploadOptions } from '@openbase/core'
+import type {
+    BucketPolicy,
+    FileRef,
+    StorageObjectMetadata,
+    StorageObjectPolicy,
+    StorageObjectRecord,
+    TelegramChannelRef,
+    TransformOptions,
+    UploadOptions,
+} from '@openbase/core'
 import { ConflictError, ForbiddenError } from '@openbase/core'
 import type { StorageProvider } from '@openbase/telegram'
 
@@ -13,8 +22,16 @@ interface StorageManifest {
     fileRef: FileRef
     uploadedBy: string | null
     createdAt: number
+    updatedAt: number
     size: number
     mimeType: string
+    metadata: StorageObjectMetadata
+    policy?: StorageObjectPolicy | null
+}
+
+interface StorageManifestRecord extends StorageObjectRecord {
+    fileRef: FileRef
+    manifestMessageId: number
 }
 
 export class StorageService {
@@ -32,7 +49,7 @@ export class StorageService {
         path: string,
         data: Buffer,
         options: UploadOptions = {}
-    ): Promise<{ path: string; publicUrl: string; fileRef: FileRef }> {
+    ): Promise<{ path: string; publicUrl: string; fileRef: FileRef; metadata: StorageObjectMetadata; policy?: StorageObjectPolicy | null }> {
         return this.storeUpload(
             provider,
             projectId,
@@ -58,7 +75,7 @@ export class StorageService {
         path: string,
         stream: AsyncIterable<Buffer | Uint8Array>,
         options: UploadOptions = {}
-    ): Promise<{ path: string; publicUrl: string; fileRef: FileRef }> {
+    ): Promise<{ path: string; publicUrl: string; fileRef: FileRef; metadata: StorageObjectMetadata; policy?: StorageObjectPolicy | null }> {
         return this.storeUpload(
             provider,
             projectId,
@@ -189,14 +206,9 @@ export class StorageService {
         bucketName: string,
         bucketChannel: TelegramChannelRef,
         prefix?: string
-    ): Promise<Array<{ path: string; size: number; mimeType: string; createdAt: number }>> {
+    ): Promise<StorageObjectRecord[]> {
         const manifests = await this.getManifests(provider, storageIndexChannel, bucketName, bucketChannel, prefix)
-        return manifests.map(manifest => ({
-            path: manifest.path,
-            size: manifest.size,
-            mimeType: manifest.mimeType,
-            createdAt: manifest.createdAt,
-        }))
+        return manifests.map(manifest => this.toObjectRecord(manifest))
     }
 
     async findFile(
@@ -210,6 +222,10 @@ export class StorageService {
         size: number
         mimeType: string
         createdAt: number
+        updatedAt: number
+        uploadedBy: string | null
+        metadata: StorageObjectMetadata
+        policy?: StorageObjectPolicy | null
         fileRef: FileRef
         manifestMessageId: number
     } | null> {
@@ -236,6 +252,47 @@ export class StorageService {
         }
     }
 
+    async updateObject(
+        provider: StorageProvider,
+        storageIndexChannel: TelegramChannelRef,
+        manifestMessageId: number,
+        updates: {
+            metadata?: Partial<StorageObjectMetadata> & {
+                tags?: Record<string, string>
+                customMetadata?: Record<string, string>
+            }
+            policy?: StorageObjectPolicy | null
+        }
+    ): Promise<StorageObjectRecord | null> {
+        const raw = await provider.getMessage(storageIndexChannel, manifestMessageId)
+        if (!raw) {
+            return null
+        }
+
+        const manifest = JSON.parse(raw) as StorageManifest
+        if (manifest.__type !== 'STORAGE_MANIFEST') {
+            return null
+        }
+
+        const nextMetadata: StorageObjectMetadata = {
+            ...manifest.metadata,
+            ...(updates.metadata || {}),
+            tags: updates.metadata?.tags ?? manifest.metadata.tags,
+            customMetadata: updates.metadata?.customMetadata ?? manifest.metadata.customMetadata,
+            updatedAt: Date.now(),
+        }
+
+        const nextManifest: StorageManifest = {
+            ...manifest,
+            updatedAt: nextMetadata.updatedAt,
+            metadata: nextMetadata,
+            ...(updates.policy !== undefined ? { policy: updates.policy } : {}),
+        }
+
+        await provider.editMessage(storageIndexChannel, manifestMessageId, JSON.stringify(nextManifest))
+        return this.toObjectRecord(nextManifest)
+    }
+
     private async storeUpload(
         provider: StorageProvider,
         projectId: string,
@@ -245,7 +302,7 @@ export class StorageService {
         path: string,
         options: UploadOptions,
         uploadFile: (mimeType: string) => Promise<{ fileRef: FileRef; size: number; mimeType: string }>
-    ): Promise<{ path: string; publicUrl: string; fileRef: FileRef }> {
+    ): Promise<{ path: string; publicUrl: string; fileRef: FileRef; metadata: StorageObjectMetadata; policy?: StorageObjectPolicy | null }> {
         const mimeType = options.mimeType || 'application/octet-stream'
 
         const existing = await this.findFile(
@@ -270,6 +327,15 @@ export class StorageService {
         }
 
         const uploaded = await uploadFile(mimeType)
+        const now = Date.now()
+        const metadata: StorageObjectMetadata = {
+            contentType: uploaded.mimeType,
+            size: uploaded.size,
+            createdAt: now,
+            updatedAt: now,
+            ...(options.metadata?.tags ? { tags: options.metadata.tags } : {}),
+            ...(options.metadata?.customMetadata ? { customMetadata: options.metadata.customMetadata } : {}),
+        }
         const manifest: StorageManifest = {
             __type: 'STORAGE_MANIFEST',
             path,
@@ -277,9 +343,12 @@ export class StorageService {
             bucketChannel,
             fileRef: uploaded.fileRef,
             uploadedBy: options.userId || null,
-            createdAt: Date.now(),
+            createdAt: now,
+            updatedAt: now,
             size: uploaded.size,
             mimeType: uploaded.mimeType,
+            metadata,
+            policy: options.policy ?? null,
         }
 
         await provider.sendMessage(storageIndexChannel, JSON.stringify(manifest))
@@ -288,6 +357,8 @@ export class StorageService {
             path,
             publicUrl: `${this.apiPublicUrl}/api/v1/${projectId}/storage/${bucketName}/${path.split('/').map(encodeURIComponent).join('/')}`,
             fileRef: uploaded.fileRef,
+            metadata,
+            ...(options.policy ? { policy: options.policy } : {}),
         }
     }
 
@@ -297,18 +368,11 @@ export class StorageService {
         bucketName: string,
         bucketChannel: TelegramChannelRef,
         prefix?: string
-    ): Promise<Array<{
-        path: string
-        size: number
-        mimeType: string
-        createdAt: number
-        fileRef: FileRef
-        manifestMessageId: number
-    }>> {
+    ): Promise<StorageManifestRecord[]> {
         const messages = await this.getAllMessages(provider, storageIndexChannel)
 
         return messages
-            .map(message => {
+            .map<StorageManifestRecord | null>(message => {
                 try {
                     const manifest = JSON.parse(message.text) as StorageManifest
                     if (manifest.__type !== 'STORAGE_MANIFEST') return null
@@ -321,6 +385,15 @@ export class StorageService {
                         size: manifest.size,
                         mimeType: manifest.mimeType,
                         createdAt: manifest.createdAt,
+                        updatedAt: manifest.updatedAt ?? manifest.createdAt,
+                        uploadedBy: manifest.uploadedBy,
+                        policy: manifest.policy ?? null,
+                        metadata: manifest.metadata ?? {
+                            contentType: manifest.mimeType,
+                            size: manifest.size,
+                            createdAt: manifest.createdAt,
+                            updatedAt: manifest.updatedAt ?? manifest.createdAt,
+                        },
                         fileRef: manifest.fileRef,
                         manifestMessageId: message.id,
                     }
@@ -328,14 +401,7 @@ export class StorageService {
                     return null
                 }
             })
-            .filter((manifest): manifest is {
-                path: string
-                size: number
-                mimeType: string
-                createdAt: number
-                fileRef: FileRef
-                manifestMessageId: number
-            } => manifest !== null)
+            .filter((manifest): manifest is StorageManifestRecord => manifest !== null)
     }
 
     private async getAllMessages(
@@ -378,6 +444,28 @@ export class StorageService {
 
     private buildPartFilename(path: string, index: number): string {
         return `${path}.part${String(index + 1).padStart(6, '0')}`
+    }
+
+    private toObjectRecord(manifest: {
+        path: string
+        size: number
+        mimeType: string
+        createdAt: number
+        updatedAt: number
+        uploadedBy: string | null
+        metadata: StorageObjectMetadata
+        policy?: StorageObjectPolicy | null
+    }): StorageObjectRecord {
+        return {
+            path: manifest.path,
+            size: manifest.size,
+            mimeType: manifest.mimeType,
+            createdAt: manifest.createdAt,
+            updatedAt: manifest.updatedAt,
+            uploadedBy: manifest.uploadedBy,
+            metadata: manifest.metadata,
+            policy: manifest.policy ?? null,
+        }
     }
 
     private isImage(mimeType: string): boolean {

@@ -24,11 +24,13 @@
  * ```
  */
 
+import type { TransactionOperation } from './types.js'
 import { QueryBuilder } from './QueryBuilder.js'
 import { OpenBaseAdminClient } from './AdminClient.js'
 import { AuthClient } from './AuthClient.js'
 import { StorageClient } from './StorageClient.js'
 import { RealtimeClient, RealtimeChannel } from './RealtimeClient.js'
+import { TransactionClient } from './TransactionClient.js'
 
 export class OpenBaseClient {
     /** Authentication client */
@@ -37,6 +39,8 @@ export class OpenBaseClient {
     storage: StorageClient
     /** Realtime client */
     realtime: RealtimeClient
+    /** Transaction client */
+    transactions: TransactionClient
 
     protected readonly projectUrl: string
     protected readonly apiKey: string
@@ -66,6 +70,13 @@ export class OpenBaseClient {
             () => this.auth.getAccessToken(),
             () => this.apiKey
         )
+
+        this.transactions = new TransactionClient(
+            this.projectUrl,
+            this.projectId,
+            this.apiKey,
+            () => this.auth.getAccessToken()
+        )
     }
 
     /**
@@ -82,6 +93,10 @@ export class OpenBaseClient {
      */
     channel(name: string): RealtimeChannel {
         return this.realtime.channel(name)
+    }
+
+    async transaction(operations: TransactionOperation[]) {
+        return this.transactions.execute(operations)
     }
 
     /**
@@ -139,6 +154,7 @@ export { OpenBaseAdminClient } from './AdminClient.js'
 export { AuthClient } from './AuthClient.js'
 export { StorageClient } from './StorageClient.js'
 export { RealtimeClient, RealtimeChannel } from './RealtimeClient.js'
+export { TransactionClient } from './TransactionClient.js'
 export { generateTypescriptSchemaClient } from './typegen.js'
 export type {
     QueryResult,
@@ -151,6 +167,14 @@ export type {
     PresenceMeta,
     PresenceState,
     PresenceEventPayload,
+    StorageObjectMetadata,
+    StorageObjectMetadataInput,
+    StorageObjectRecord,
+    StorageRule,
+    StorageObjectPolicy,
+    ResumableUploadSession,
     UploadOptions,
     TransformOptions,
+    TransactionOperation,
+    TransactionResult,
 } from './types.js'
